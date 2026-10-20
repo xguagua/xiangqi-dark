@@ -11,7 +11,7 @@ A two-player, browser-based **dark Xiangqi** game for a local area network. The 
 - Python **3.10 or newer** and `pip`.
 - A Windows, Linux, or macOS host that can be reached by both players on the same LAN.
 - A modern browser on each player's device.
-- Network access from each browser to `cdn.socket.io` for the Socket.IO browser client currently referenced by `templates/index.html`. For a fully offline LAN, download the matching Socket.IO client asset and serve it from `static/` instead; see [Offline/browser asset note](#17-offlinebrowser-asset-note).
+- A local copy of the Socket.IO browser client at `static/socket.io.js`. The page does not use an online CDN, so it works on a fully offline LAN.
 
 No Node.js, npm, frontend bundler, or external database server is needed.
 
@@ -22,6 +22,7 @@ Extract the project archive. The project root is the directory containing `app.p
 ```text
 xiangqi-dark/
 ├── app.py
+├── config.yaml
 ├── requirements.txt
 ├── README.md
 ├── README.zh-CN.md
@@ -30,6 +31,7 @@ xiangqi-dark/
 │   └── index.html
 └── static/
     ├── app.js
+    ├── socket.io.js
     └── style.css
 ```
 
@@ -74,6 +76,7 @@ The current dependency ranges are:
 - `Flask` — HTTP routes and HTML template rendering.
 - `Flask-SocketIO` — bidirectional real-time game events.
 - `eventlet` — the Socket.IO async server backend selected by `app.py`.
+- `PyYAML` — loads the server bind address and port from `config.yaml`.
 
 If installation fails, check that the virtual environment is active and that the selected Python version is compatible with the packages available to your platform. Do not silently remove Eventlet from `requirements.txt`: the application explicitly configures `async_mode="eventlet"`.
 
@@ -83,15 +86,23 @@ If installation fails, check that the virtual environment is active and that the
 python app.py
 ```
 
-By default the server listens on **`0.0.0.0:5000`**, making it reachable from other LAN devices. On the host itself, open:
+The server reads `config.yaml` at startup. Its default configuration listens on **`0.0.0.0:8080`**, making it reachable from other LAN devices. On the host itself, open:
 
 ```text
-http://127.0.0.1:5000
+http://127.0.0.1:8080
 ```
 
 Keep the terminal open while playing. Press **Ctrl+C** in that terminal to stop the server cleanly.
 
-To use a different port:
+To use a different bind address or port, edit:
+
+```yaml
+server:
+  ip: 0.0.0.0
+  port: 8080
+```
+
+The `PORT` environment variable can temporarily override `server.port`:
 
 **PowerShell**
 
@@ -106,27 +117,22 @@ python app.py
 PORT=8080 python app.py
 ```
 
-The server reads `PORT` when it starts. Both players must use the same host address and port.
+Both players must use the same host address and port.
 
 ### 1.6 Let another device connect over the LAN
 
 1. Find the server computer's **LAN/private IP address**. On Windows, run `ipconfig` and look for the active adapter's IPv4 address. On Linux, use `ip addr`; on macOS, check Network settings or `ifconfig`.
 2. Ensure both devices are connected to a network that allows peer-to-peer LAN traffic. Guest Wi-Fi and client-isolated access points may block this.
-3. On the second device, open `http://SERVER_LAN_IP:5000` (replace the address and port with the actual values).
+3. On the second device, open `http://SERVER_LAN_IP:8080` (replace the address and port with the values in `config.yaml`).
 4. Each player sets a nickname. One player creates a room and shares the five-character room code; the other enters the code and joins.
 
-**Firewall:** On Windows, allow the intended Python runtime or inbound TCP port `5000` on a trusted **Private** network. If using another port, allow that port instead. Only open the port on networks where you trust the other devices. Do not disable the firewall globally to make the game work.
+**Firewall:** On Windows, allow the intended Python runtime or inbound TCP port `8080` on a trusted **Private** network. If using another port, allow that port instead. Only open the port on networks where you trust the other devices. Do not disable the firewall globally to make the game work.
 
 ### 1.7 Offline/browser asset note
 
-The current HTML loads Socket.IO's browser client from the CDN URL `https://cdn.socket.io/4.8.1/socket.io.min.js`. The Python server can run on a LAN without exposing port 5000 to the internet, but browsers still need to load that JavaScript file. If the LAN has no internet access:
+The current HTML loads Socket.IO's browser client from `/static/socket.io.js`; it does **not** use an online CDN. The bundled client is Socket.IO 4.8.1 and is compatible with the Socket.IO 4.x server stack used by Flask-SocketIO. Keep this local asset when packaging the project so an offline LAN has no external browser dependency.
 
-1. Obtain the Socket.IO browser client version compatible with the Socket.IO 4.x server stack used by Flask-SocketIO.
-2. Place the minified client file at `static/socket.io.min.js`.
-3. Change the script reference near the end of `templates/index.html` from the CDN URL to `/static/socket.io.min.js`.
-4. Test a fresh browser load and a two-player connection before distributing the build.
-
-Do not copy a random client library version without testing it against the installed Flask-SocketIO dependency.
+When upgrading Socket.IO, replace `static/socket.io.js` with a client version compatible with the installed Flask-SocketIO dependency. Test a fresh browser load and a two-player connection before distributing the build.
 
 ### 1.8 Persistent data and restart recovery
 
@@ -135,9 +141,11 @@ The application creates its SQLite database and Flask session key in the project
 - **`players.sqlite3`** — player nickname and active-match markers in `players`, plus serialized unfinished games in `games`.
 - **`.flask_secret_key`** — generated automatically on first startup when the `SECRET_KEY` environment variable is not set. It signs the browser's Flask session cookie, including the persistent player ID.
 
+The same database also contains the `replays` table for matches that a player chose to retain after the game ended. A replay is visible only to the signed-in player who saved it.
+
 Keep both files when upgrading or restarting the server. Removing the database discards stored player/game state. Replacing the secret key invalidates existing signed browser sessions, so players may no longer be recognized as the same players. If the user clears their browser cookies/site data, the server can no longer associate that browser with its prior player ID.
 
-At startup, the app loads unfinished games from SQLite and reserves their seats. When the browser reconnects with its existing session cookie, the Socket.IO `connect` handler binds the new socket ID to the stored seat and sends the latest state. The game board, turn, captured pieces, log, last move, undo history, pending request, and request-denial locks are serialized into the `games.state_json` field.
+At startup, the app loads unfinished games from SQLite and reserves their seats. When the browser reconnects with its existing session cookie, the Socket.IO `connect` handler binds the new socket ID to the stored seat and sends the latest state. The game board, turn, captured pieces, log, last move, undo history, replay frames, pending request, and request-denial locks are serialized into the `games.state_json` field.
 
 **Safe backup/upgrade procedure:**
 
@@ -165,15 +173,15 @@ Set the result as `SECRET_KEY` in the launch environment; do not paste a product
 |---|---|
 | `python` is not found | Install Python, reopen the terminal, and use `py -3` on Windows if needed. |
 | `ModuleNotFoundError` | Activate `.venv` and rerun `python -m pip install -r requirements.txt`. |
-| Local browser cannot open the page | Check the terminal for startup errors and verify the port. Try `http://127.0.0.1:5000`. |
+| Local browser cannot open the page | Check the terminal for startup errors and verify `config.yaml`. Try `http://127.0.0.1:8080` unless the configured port differs. |
 | The host works, but the second device cannot connect | Check the host's LAN IP, subnet, guest Wi-Fi/client isolation, OS firewall, and port. Do not use `127.0.0.1` from the second device. |
-| Page loads but connection indicator stays disconnected | Check browser developer tools and access to the Socket.IO client CDN, or host the client locally as described above. |
+| Page loads but connection indicator stays disconnected | Check browser developer tools, confirm `/static/socket.io.js` returns successfully, and verify the configured host/port and firewall. |
 | Player does not resume their game | Keep browser cookies/site data, `players.sqlite3`, and `.flask_secret_key`; check that the browser is using the same hostname/session and inspect the server log. |
 | A game disappears after an upgrade | Stop using that build and restore the database backup. Keep game-state serialization backward-compatible when changing `serialize_game()` or `deserialize_game()`. |
 
 ### 1.11 Deployment/security boundaries
 
-This project is intended for trusted-LAN play and development, **not as a hardened public internet service**. It has no account/password system, TLS termination, rate limiting, abuse protections, or multi-worker shared Socket.IO state. Do not expose port 5000 directly to the public internet. For public deployment, put the application behind a properly configured production reverse proxy and add authentication, TLS, request protections, rate limits, and a shared Socket.IO message queue/session strategy first.
+This project is intended for trusted-LAN play and development, **not as a hardened public internet service**. It has no account/password system, TLS termination, rate limiting, abuse protections, or multi-worker shared Socket.IO state. Do not expose port 8080 directly to the public internet. For public deployment, put the application behind a properly configured production reverse proxy and add authentication, TLS, request protections, rate limits, and a shared Socket.IO message queue/session strategy first.
 
 The application uses process-local `rooms` plus SQLite persistence and is designed to run as a **single application process**. SQLite saves games across restarts; it does not make in-memory room state automatically shared across multiple server workers.
 
@@ -251,7 +259,16 @@ The movement below is the rule for a **revealed piece**, and also describes the 
 - While an undo/draw request is pending, neither player can make a move. Only the recipient can answer the request; stale or mismatched request IDs are rejected by the server.
 - Request controls are disabled client-side when unavailable, but all important conditions are checked again on the server.
 
-### 2.9 Rules deliberately not implemented
+### 2.9 Saved replays
+
+- The server records the public board after every successful move. An accepted two-move undo removes the corresponding two replay frames.
+- When a match ends by general capture, surrender, or an accepted draw, each participant is asked whether to keep a replay.
+- Choosing **Keep replay** saves the recording to that player's own replay list; choosing **Don't keep** does not create a saved replay for that player. Each participant can make this choice independently.
+- Open a saved replay from the **Replays** panel on the lobby screen. The slider changes the displayed step, and the left/right triangle buttons move one step backward or forward.
+- Replay snapshots use the same privacy boundary as live states. A hidden piece's identity is not stored in browser-visible board frames. When a hidden piece is captured, only the capturing player's saved replay reveals its true kind.
+- Saved replays are scoped to the signed-in browser session that kept them. Clearing browser cookies or replacing `.flask_secret_key` can make those saved replays inaccessible to that browser.
+
+### 2.10 Rules deliberately not implemented
 
 This is a custom casual game, not a complete tournament Xiangqi engine. In particular:
 
@@ -264,10 +281,13 @@ This is a custom casual game, not a complete tournament Xiangqi engine. In parti
 ### 3.1 File map
 
 - `app.py` — authoritative game server: Flask routes, Socket.IO events, board setup, move validation, room management, request flow, serialization, and SQLite persistence.
+- `config.yaml` — server bind address and port loaded by `app.py`.
 - `templates/index.html` — page structure, board line SVG, actions, sidebar, and request dialog.
 - `static/app.js` — Socket.IO client, local UI state, board rendering, request dialog, and user interactions. It should not be treated as the authority for legal moves.
 - `static/style.css` — wooden board and piece styling, responsive layout, state markers, dialog, and toast appearance.
+- `static/socket.io.js` — locally served Socket.IO 4.8.1 browser client; no online CDN is used.
 - `requirements.txt` — Python dependency ranges.
+- `CHANGELOG.md` — notable user-visible and maintenance changes.
 - `README.zh-CN.md` — Chinese-language version of the operational and rules guide.
 - `LICENSE` — MIT license.
 - `AGENTS.md` — working invariants and checklist for future coding agents.
@@ -275,12 +295,14 @@ This is a custom casual game, not a complete tournament Xiangqi engine. In parti
 ### 3.2 Server data model
 
 - `Piece(kind, side, face_up, move_kind)`: `kind` is the true identity; `move_kind` is the starting square's movement pattern; `face_up` decides which is used by `legal_move()`.
-- `GameRoom`: board, players/seats, turn, captures, log, undo snapshots, last move, move/turn counters, pending request and denial locks.
+- `GameRoom`: board, players/seats, turn, captures, log, undo snapshots, replay frames, last move, move/turn counters, pending request and denial locks.
 - `rooms`: process-local dictionary keyed by room code. SQLite is the recovery source on process startup, but live state is still kept in memory.
 - `players` table: stores a stable browser/session `player_id`, nickname, `in_game`, `room_code`, and `side`. **The column is named `sid`, but it stores the persistent player ID, not the current Socket.IO SID.** The live socket SID is replaced when the browser reconnects.
 - `games` table: stores one serialized unfinished match per room in `state_json`.
 
 `db()` creates missing tables and migrates the game-status columns from older versions. `serialize_game()` / `deserialize_game()` define the persisted game-state schema. `load_persisted_rooms()` restores rooms at import/startup; `restore_player_room()` reattaches a reconnecting browser after its Socket.IO connection is established.
+
+`replays` stores one row per player who retained a finished match. The row includes the owner's persistent player ID, room/result metadata, and owner-filtered replay JSON, so one participant's decision or hidden-piece knowledge cannot affect the other participant's saved copy.
 
 ### 3.3 Socket.IO event contract
 
@@ -306,7 +328,15 @@ Server to client:
 | `state` | Player-specific public snapshot of the match. |
 | `notice` | Human-readable operation result/error. |
 | `request_result` | Result of a request sent by the player. |
-| `room_ended` | Match ended and the page should return to the lobby. |
+| `room_ended` | Match ended; the page returns to the lobby and receives an optional `replay_offer` prompt. |
+
+HTTP endpoints:
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/replays` | List replays owned by the current signed-in player. |
+| `GET /api/replays/<id>` | Load one owner-filtered replay. |
+| `POST /api/replays/offers/<id>` | Accept or decline the post-game replay offer for the current player. |
 
 The `state` payload is viewer-specific. Keep its hidden-piece and captured-piece privacy rules intact. When adding a new persistent `GameRoom` field, update both serialization and deserialization, choose a safe default for old saved JSON, and consider how undo snapshots should restore it.
 

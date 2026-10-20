@@ -13,6 +13,7 @@ supports restart recovery, but the in-memory room dictionary is not a multi-work
 shared-state mechanism.
 """
 
+import copy
 import os
 import json
 import random
@@ -21,6 +22,7 @@ import sqlite3
 import string
 from dataclasses import dataclass, field
 from threading import RLock
+import yaml
 from flask import Flask, render_template, request, session, jsonify
 from flask_socketio import SocketIO, emit, join_room, leave_room
 
@@ -28,6 +30,43 @@ from flask_socketio import SocketIO, emit, join_room, leave_room
 # Keep local SQLite data and the automatically generated signing key beside app.py.
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "players.sqlite3")
+CONFIG_PATH = os.path.join(BASE_DIR, "config.yaml")
+
+
+def load_config():
+    """Load and validate the server bind address and port from config.yaml."""
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as config_file:
+            config = yaml.safe_load(config_file) or {}
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"配置文件不存在：{CONFIG_PATH}") from exc
+    except yaml.YAMLError as exc:
+        raise RuntimeError(f"配置文件 YAML 语法无效：{CONFIG_PATH}") from exc
+
+    if not isinstance(config, dict):
+        raise RuntimeError("config.yaml 顶层必须是映射")
+    server = config.get("server")
+    if not isinstance(server, dict):
+        raise RuntimeError("config.yaml 必须包含 server 配置段")
+
+    host = server.get("ip")
+    port = server.get("port")
+    if not isinstance(host, str) or not host.strip():
+        raise RuntimeError("config.yaml 中的 server.ip 必须是非空字符串")
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        raise RuntimeError("config.yaml 中的 server.port 必须是 1 到 65535 之间的整数")
+
+    # Keep the established PORT override for temporary deployments.
+    if "PORT" in os.environ:
+        try:
+            port = int(os.environ["PORT"])
+        except ValueError as exc:
+            raise RuntimeError("环境变量 PORT 必须是整数") from exc
+        if not 1 <= port <= 65535:
+            raise RuntimeError("环境变量 PORT 必须在 1 到 65535 之间")
+
+    return {"ip": host.strip(), "port": port}
+
 
 def load_secret_key():
     """Keep Flask's cookie-signing key stable across server restarts by default."""
@@ -59,6 +98,7 @@ app.config["SECRET_KEY"] = load_secret_key()
 socketio = SocketIO(app, async_mode="eventlet")
 lock = RLock()
 rooms = {}
+pending_replays = {}
 
 # Internal piece codes: uppercase is Red, lowercase is Black. These codes are
 # also the stable representation written into SQLite; avoid renaming them without
@@ -101,6 +141,18 @@ def db():
         state_json TEXT NOT NULL,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS replays (
+        id TEXT PRIMARY KEY,
+        owner_player_id TEXT NOT NULL,
+        room_code TEXT NOT NULL,
+        winner TEXT,
+        state_json TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_replays_owner_created "
+        "ON replays(owner_player_id, created_at DESC)"
+    )
     conn.commit()
     return conn
 
@@ -143,6 +195,7 @@ class GameRoom:
     turn_seq: int = 0  # Advances after a move/undo; scopes same-turn rejection locks.
     pending_request: dict = None  # At most one undo/draw request can be pending.
     denied_request_turns: dict = field(default_factory=dict)  # request type -> turn_seq
+    replay_frames: list = field(default_factory=list)  # Public states after each successful move.
 
 
 # ---- SQLite persistence -----------------------------------------------------
@@ -216,6 +269,7 @@ def serialize_game(game):
         "turn_seq": game.turn_seq,
         "pending_request": game.pending_request,
         "denied_request_turns": game.denied_request_turns,
+        "replay_frames": game.replay_frames,
     }
 
 
@@ -229,7 +283,7 @@ def deserialize_game(data):
         "player_id": player.get("player_id"),
         "nickname": player.get("nickname", "玩家"),
     } for side, player in data.get("players", {}).items()}
-    return GameRoom(
+    game = GameRoom(
         code=data["code"], board=board, players=players,
         turn=data.get("turn", "red"), winner=data.get("winner"),
         captured=data.get("captured", {"red": [], "black": []}),
@@ -240,7 +294,11 @@ def deserialize_game(data):
         turn_seq=data.get("turn_seq", 0),
         pending_request=data.get("pending_request"),
         denied_request_turns=data.get("denied_request_turns", {}),
+        replay_frames=data.get("replay_frames", []),
     )
+    if not game.replay_frames:
+        game.replay_frames = [make_replay_frame(game)]
+    return game
 
 
 def persist_game(game):
@@ -460,6 +518,44 @@ def public_board(game, viewer_side=None):
     return out
 
 
+def make_replay_frame(game):
+    """Capture one public replay frame after the initial position or a successful move."""
+    return {
+        "board": public_board(game),
+        "turn": game.turn,
+        "winner": game.winner,
+        "captured": copy.deepcopy(game.captured),
+        "log": list(game.log),
+        "last_move": copy.deepcopy(game.last_move),
+    }
+
+
+def replay_captured_for_viewer(captured, viewer_side):
+    """Filter hidden captured-piece identities to the selected replay viewer."""
+    return {
+        side: [
+            {
+                "kind": item["kind"] if (item["face_up"] or side == viewer_side) else None,
+                "side": item["side"],
+                "face_up": item["face_up"],
+            }
+            for item in items
+        ]
+        for side, items in captured.items()
+    }
+
+
+def replay_frames_for_viewer(frames, viewer_side):
+    """Remove the true identities of hidden captures the viewer is not entitled to know."""
+    return [
+        {
+            **frame,
+            "captured": replay_captured_for_viewer(frame.get("captured", {}), viewer_side),
+        }
+        for frame in frames
+    ]
+
+
 def snapshot(game, sid):
     """Create the state payload for one socket, with capture knowledge filtered.
 
@@ -598,6 +694,78 @@ def save_nickname_http():
     return jsonify({"nickname": nickname})
 
 
+@app.get("/api/replays")
+def list_replays():
+    """List saved replays owned by the current signed-in player."""
+    player_id = session.get("player_id")
+    if not player_id:
+        return jsonify({"replays": []})
+    conn = db()
+    try:
+        rows = conn.execute(
+            "SELECT id, state_json, created_at FROM replays "
+            "WHERE owner_player_id = ? ORDER BY created_at DESC",
+            (player_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    replays = []
+    for row in rows:
+        try:
+            data = json.loads(row["state_json"])
+        except (TypeError, ValueError):
+            continue
+        replays.append({
+            "id": row["id"],
+            "room_code": data.get("room_code", "-----"),
+            "winner": data.get("winner"),
+            "viewer_side": data.get("viewer_side"),
+            "players": data.get("players", {}),
+            "move_count": max(0, len(data.get("frames", [])) - 1),
+            "created_at": row["created_at"],
+        })
+    return jsonify({"replays": replays})
+
+
+@app.get("/api/replays/<replay_id>")
+def get_replay(replay_id):
+    """Return one owner-filtered replay to its participant."""
+    player_id = session.get("player_id")
+    if not player_id:
+        return jsonify({"error": "请先设置昵称。"}), 403
+    conn = db()
+    try:
+        row = conn.execute(
+            "SELECT state_json, created_at FROM replays "
+            "WHERE id = ? AND owner_player_id = ?",
+            (replay_id, player_id),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return jsonify({"error": "回放不存在或无权查看。"}), 404
+    try:
+        data = json.loads(row["state_json"])
+    except (TypeError, ValueError):
+        return jsonify({"error": "回放数据已损坏。"}), 500
+    data["id"] = replay_id
+    data["created_at"] = row["created_at"]
+    data["move_count"] = max(0, len(data.get("frames", [])) - 1)
+    return jsonify(data)
+
+
+@app.post("/api/replays/offers/<offer_id>")
+def decide_replay_offer(offer_id):
+    """Keep or discard the replay offer for the authenticated participant."""
+    player_id = session.get("player_id")
+    if not player_id:
+        return jsonify({"error": "请先设置昵称。"}), 403
+    keep = bool((request.get_json(silent=True) or {}).get("keep"))
+    with lock:
+        result, status = resolve_replay_offer(offer_id, player_id, keep)
+    return jsonify(result), status
+
+
 # ---- Socket.IO event handlers ----------------------------------------------
 @socketio.on("set_nickname")
 def set_nickname(data):
@@ -644,6 +812,7 @@ def create_room():
             "player_id": session.get("player_id"),
             "nickname": nickname,
         }
+        game.replay_frames = [make_replay_frame(game)]
         rooms[code] = game
         persist_game(game)
         join_room(code)
@@ -682,19 +851,137 @@ def join_game(data):
         broadcast(game)
 
 
-def finish_game(game, result, message):
-    """Finalize a match, notify both players, and remove durable active-game state."""
-    """Finish a match, broadcast the result, then release both players' SQL markers."""
-    game.winner = result  # red / black / draw
+def replay_offer_summary(offer):
+    """Return the non-sensitive metadata sent in the post-game replay prompt."""
+    return {
+        "id": offer["id"],
+        "room_code": offer["room_code"],
+        "winner": offer["winner"],
+        "players": {
+            side: player["nickname"]
+            for side, player in offer["players"].items()
+        },
+        "move_count": max(0, len(offer["frames"]) - 1),
+    }
+
+
+def create_replay_offer(game):
+    """Keep a finished match in memory until each participant chooses whether to save it."""
+    if len(game.players) != 2:
+        return None
+    if not game.replay_frames:
+        game.replay_frames = [make_replay_frame(game)]
+    offer_id = secrets.token_urlsafe(12)
+    offer = {
+        "id": offer_id,
+        "room_code": game.code,
+        "winner": game.winner,
+        "players": {
+            side: {
+                "player_id": player.get("player_id"),
+                "nickname": player.get("nickname", "玩家"),
+            }
+            for side, player in game.players.items()
+        },
+        "frames": copy.deepcopy(game.replay_frames),
+        "responses": {},
+    }
+    pending_replays[offer_id] = offer
+    return offer
+
+
+def resolve_replay_offer(offer_id, player_id, keep):
+    """Apply one participant's replay decision without affecting the other participant."""
+    offer = pending_replays.get(offer_id)
+    if not offer:
+        return {"error": "该回放邀请已失效。"}, 404
+    viewer_side = next(
+        (
+            side
+            for side, player in offer["players"].items()
+            if player.get("player_id") == player_id
+        ),
+        None,
+    )
+    if viewer_side is None:
+        return {"error": "你不是本局参与者，无法处理该回放。"}, 403
+    if player_id in offer["responses"]:
+        existing_id = offer["responses"][player_id]
+        return {
+            "saved": existing_id is not None,
+            "replay_id": existing_id,
+            "message": "回放已保留。" if existing_id else "已放弃保留本局回放。",
+        }, 200
+    saved_id = None
+    if keep:
+        saved_id = secrets.token_urlsafe(12)
+        data = {
+            "room_code": offer["room_code"],
+            "winner": offer["winner"],
+            "viewer_side": viewer_side,
+            "players": {
+                side: player["nickname"]
+                for side, player in offer["players"].items()
+            },
+            "frames": replay_frames_for_viewer(offer["frames"], viewer_side),
+        }
+        conn = db()
+        try:
+            conn.execute(
+                "INSERT INTO replays(id, owner_player_id, room_code, winner, state_json) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    saved_id,
+                    player_id,
+                    offer["room_code"],
+                    offer["winner"],
+                    json.dumps(data, ensure_ascii=False, separators=(",", ":")),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    offer["responses"][player_id] = saved_id
+    participant_ids = {
+        player.get("player_id")
+        for player in offer["players"].values()
+        if player.get("player_id")
+    }
+    if participant_ids and participant_ids.issubset(set(offer["responses"])):
+        pending_replays.pop(offer_id, None)
+    return {
+        "saved": keep,
+        "replay_id": saved_id,
+        "message": "回放已保留。" if keep else "已放弃保留本局回放。",
+    }, 200
+
+
+def finish_game(game, result, message=None, state_already_broadcast=False):
+    """Finalize a match, offer its replay, and release durable active-game state."""
+    game.winner = result
     game.pending_request = None
-    game.log.append(message)
-    persist_game(game)
-    broadcast(game)
+    if message:
+        game.log.append(message)
+    if game.replay_frames:
+        game.replay_frames[-1]["winner"] = result
+        game.replay_frames[-1]["log"] = list(game.log)
+    if not state_already_broadcast:
+        persist_game(game)
+        broadcast(game)
+    offer = create_replay_offer(game)
     code = game.code
     for player in list(game.players.values()):
         clear_player_game_status(player.get("player_id"))
         if player.get("sid"):
-            socketio.emit("room_ended", {"code": code, "winner": result}, to=player["sid"])
+            socketio.emit(
+                "room_ended",
+                {
+                    "code": code,
+                    "winner": result,
+                    "replay_offer": replay_offer_summary(offer) if offer else None,
+                },
+                to=player["sid"],
+            )
     rooms.pop(code, None)
     delete_persisted_game(code)
 
@@ -813,6 +1100,9 @@ def respond_request(data):
         game.winner = previous["winner"]
         game.log = previous["log"]
         game.last_move = previous.get("last_move")
+        del game.replay_frames[-2:]
+        if not game.replay_frames:
+            game.replay_frames = [make_replay_frame(game)]
         # 使用新的回合序号，避免悔棋后的状态沿用旧的拒绝限制。
         game.turn_seq += 1
         game.log.append("双方同意悔棋，双方各撤销最近一步，共撤销两步。")
@@ -911,19 +1201,14 @@ def move(data):
         else:
             game.log.append(f"{game.players[side]['nickname']} 获胜！")
         game.turn_seq += 1
+        game.replay_frames.append(make_replay_frame(game))
         # Save the latest board before broadcasting, so a server restart does not
         # discard moves or the room's player-to-seat mapping.
         persist_game(game)
         broadcast(game)
         if game.winner:
-            # 棋盘吃掉将帅后直接结束对局。
-            finished_code = game.code
-            for player in list(game.players.values()):
-                clear_player_game_status(player.get("player_id"))
-                if player.get("sid"):
-                    socketio.emit("room_ended", {"code": finished_code, "winner": game.winner}, to=player["sid"])
-            rooms.pop(finished_code, None)
-            delete_persisted_game(finished_code)
+            # 棋盘吃掉将帅后直接结束对局；状态已经广播，不再重复发送。
+            finish_game(game, game.winner, state_already_broadcast=True)
 
 
 @socketio.on("disconnect")
@@ -936,9 +1221,18 @@ def disconnected():
 
 # ---- Direct development/LAN entry point -----------------------------------
 if __name__ == "__main__":
-    print("暗棋服务器启动。局域网玩家访问 http://服务器IP:5000")
+    server_config = load_config()
+    print(
+        f"暗棋服务器启动。监听 {server_config['ip']}:{server_config['port']}；"
+        f"局域网玩家访问 http://服务器IP:{server_config['port']}"
+    )
     try:
-        socketio.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "5000")), debug=False)
+        socketio.run(
+            app,
+            host=server_config["ip"],
+            port=server_config["port"],
+            debug=False,
+        )
     except KeyboardInterrupt:
         print("\n正在关闭服务器...")
     finally:

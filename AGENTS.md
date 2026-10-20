@@ -13,6 +13,8 @@ Read `README.md` before changing behavior; `README.zh-CN.md` contains the same g
 7. **Keep reconnection working.** `players.sid` is a legacy column name that stores the persistent player ID from the Flask session, not the current Socket.IO SID. The live connection ID is stored separately in each in-memory `game.players[side]["sid"]` and changes on reconnect.
 8. **Single-process assumption.** `rooms` is process-local. SQLite allows recovery after restart but is not a shared real-time room backend for multiple workers. Do not recommend multi-worker deployment without introducing shared state and a Socket.IO message queue.
 9. **Treat runtime data as private.** Never commit `players.sqlite3`, `.flask_secret_key`, `.env`, or test data copied from a user's live database. Preserve the first two files during upgrades and backups.
+10. **Keep the browser client local.** `templates/index.html` loads Socket.IO from `/static/socket.io.js`, not from an online CDN. Do not replace it with a CDN URL; the game must remain usable on an offline LAN.
+11. **Preserve replay privacy and ownership.** Record only public board frames during play. Saved replays are owner-scoped, and hidden captured-piece identities must be filtered separately for each participant. Accepted two-move undos remove the corresponding replay frames.
 
 ## Change workflow
 
@@ -26,7 +28,7 @@ Read `README.md` before changing behavior; `README.zh-CN.md` contains the same g
    ```
 
    `node` is optional if unavailable. Syntax checks alone do not prove Socket.IO behavior.
-4. Manually test with two independent browsers/devices: room creation/joining, ordinary and illegal moves, information privacy, capture, request acceptance/rejection, undo of two moves, reload/reconnect, server restart, and end-of-game cleanup.
+4. Manually test with two independent browsers/devices: room creation/joining, ordinary and illegal moves, information privacy, capture, request acceptance/rejection, undo of two moves, replay keep/discard and step controls, reload/reconnect, server restart, and end-of-game cleanup.
 5. Update both README files when changing user-visible rules, deployment steps, or event contracts.
 6. Before packaging, verify that the archive contains only source/docs and does not contain virtual environments, `__pycache__`, SQLite databases, or secret key files.
 
@@ -37,3 +39,4 @@ Read `README.md` before changing behavior; `README.zh-CN.md` contains the same g
 - `static/app.js`: event listeners, board rendering and browser interactions.
 - `static/style.css`: board, piece, responsive layout, markers and dialogs.
 - `requirements.txt`: runtime Python dependencies.
+- `config.yaml`: server bind address and port loaded by `app.py`.

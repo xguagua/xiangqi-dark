@@ -23,6 +23,52 @@
       <div class="inline"><input id="room-code" maxlength="5" placeholder="输入 5 位房间号"><button id="join-room">加入房间</button></div>
     </section>
 
+    <!-- Saved replays are owner-filtered by the server and can be stepped through here. -->
+    <section class="panel hidden replay-panel" id="replay-panel">
+      <div class="replay-head">
+        <div><h2>对局回放</h2><p class="muted">选择已保留的对局，逐步查看棋盘变化。</p></div>
+        <div class="replay-picker">
+          <label class="sr-only" for="replay-select">选择回放</label>
+          <select id="replay-select" disabled><option value="">暂无已保留回放</option></select>
+          <button id="open-replay" type="button" disabled>查看回放</button>
+          <button class="secondary hidden" id="close-replay" type="button">关闭</button>
+        </div>
+      </div>
+      <div class="replay-toolbar hidden" id="replay-toolbar">
+        <button class="secondary replay-step-button" id="replay-prev" type="button" aria-label="上一步" title="上一步">◀</button>
+        <label class="sr-only" for="replay-slider">回放步数</label>
+        <input id="replay-slider" type="range" min="0" max="0" step="1" value="0">
+        <button class="secondary replay-step-button" id="replay-next" type="button" aria-label="下一步" title="下一步">▶</button>
+        <output id="replay-step" for="replay-slider">第 0 / 0 步</output>
+      </div>
+      <div class="replay-viewer hidden" id="replay-viewer">
+        <div class="play-area">
+          <div class="board-wrap">
+            <div class="board-surface">
+              <svg class="board-lines" viewBox="0 0 900 1000" preserveAspectRatio="none" aria-hidden="true">
+                <g fill="none" stroke="#24180e" stroke-width="3" stroke-linecap="square" stroke-linejoin="miter">
+                  <path d="M50 50 H850 M50 150 H850 M50 250 H850 M50 350 H850 M50 450 H850 M50 550 H850 M50 650 H850 M50 750 H850 M50 850 H850 M50 950 H850" />
+                  <path d="M50 50 V950 M850 50 V950" />
+                  <path d="M150 50 V450 M250 50 V450 M350 50 V450 M450 50 V450 M550 50 V450 M650 50 V450 M750 50 V450 M150 550 V950 M250 550 V950 M350 550 V950 M450 550 V950 M550 550 V950 M650 550 V950 M750 550 V950" />
+                  <path d="M350 50 L550 250 M550 50 L350 250 M350 750 L550 950 M550 750 L350 950" />
+                </g>
+              </svg>
+              <div class="river-label" aria-hidden="true"><span>楚 河</span><span>汉 界</span></div>
+              <div id="replay-board" class="board replay-board" aria-label="回放棋盘"></div>
+            </div>
+          </div>
+          <aside class="panel sidebar">
+            <h3>回放信息</h3><p id="replay-status">请选择一步。</p>
+            <div class="player-card"><span class="red-dot"></span><div><b>红方</b><span id="replay-red-player">-</span></div></div>
+            <div class="player-card"><span class="black-dot"></span><div><b>黑方</b><span id="replay-black-player">-</span></div></div>
+            <h3>被吃棋子</h3><div class="captured-title">红方吃子</div><div id="replay-captured-red" class="captured"></div>
+            <div class="captured-title">黑方吃子</div><div id="replay-captured-black" class="captured"></div>
+            <h3>走棋记录</h3><ol id="replay-log" class="log"></ol>
+          </aside>
+        </div>
+      </div>
+    </section>
+
     <!-- All board content is rendered from the latest server-side state snapshot. -->
     <section class="game hidden" id="game">
       <div class="game-top panel">
@@ -68,10 +114,21 @@
         </div>
       </div>
     </div>
+    <div id="replay-dialog" class="dialog-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="replay-dialog-title" aria-describedby="replay-dialog-message">
+      <div class="request-dialog-card">
+        <div class="dialog-icon replay-icon" aria-hidden="true">▣</div>
+        <h2 id="replay-dialog-title">保留本局回放？</h2>
+        <p id="replay-dialog-message">可以稍后在对局回放栏中分步查看本局。</p>
+        <div class="dialog-actions">
+          <button id="discard-replay" class="secondary" type="button">不保留</button>
+          <button id="keep-replay" type="button">保留回放</button>
+        </div>
+      </div>
+    </div>
     <div id="toast" role="status" aria-live="polite"></div>
     <footer>规则校验在服务端执行 · Flask + Socket.IO</footer>
   </main>
-  <!-- This client dependency is currently loaded from a CDN; see README for offline hosting. -->
+  <!-- Socket.IO is served locally so the game works on an offline LAN. -->
   <script src="/static/socket.io.js"></script>
   <script src="/static/app.js"></script>
 </body>

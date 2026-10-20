@@ -10,10 +10,12 @@ header p,.muted{color:#82735f;margin:.35rem 0}
 .panel{background:#fffaf1;border:1px solid #dfcfb2;border-radius:14px;padding:18px;box-shadow:0 5px 18px #4e321511;margin-bottom:16px}
 h2,h3{margin:0 0 12px}h2{font-size:1.2rem}h3{font-size:1rem;margin-top:18px}
 .inline{display:flex;gap:10px}.inline input{flex:1;min-width:0}
-input{border:1px solid #d5c3a4;border-radius:9px;padding:12px;font:inherit;background:#fffdf8;color:inherit}
+input,select{border:1px solid #d5c3a4;border-radius:9px;padding:12px;font:inherit;background:#fffdf8;color:inherit}
+select{min-width:0;cursor:pointer}
 button{border:0;border-radius:9px;padding:11px 16px;background:#87412b;color:#fff8ec;font:inherit;font-weight:650;cursor:pointer;transition:filter .15s,transform .15s}
 button:hover{filter:brightness(.96)}button:active{transform:translateY(1px)}button:disabled{opacity:.45;cursor:not-allowed}
 .secondary{background:#e8dcc6;color:#443421;border:1px solid #d8c5a5}.danger{background:#9f3027;color:#fff7ee;border:1px solid #81241d}.hidden{display:none!important}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .lobby-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}.lobby-head p{margin:0;color:#82735f}
 .game-top{display:flex;align-items:center;gap:28px;flex-wrap:wrap}.game-top>div:not(.game-actions){display:flex;flex-direction:column;gap:4px}.game-top strong{font-size:1.05rem}.game-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;margin-left:auto}
 .play-area{display:grid;grid-template-columns:minmax(0,1fr) 290px;gap:16px;align-items:start}
@@ -38,10 +40,20 @@ button:hover{filter:brightness(.96)}button:active{transform:translateY(1px)}butt
 .sidebar{margin-bottom:0}.player-card{display:flex;align-items:center;gap:10px;border:1px solid #eee1cc;border-radius:10px;padding:10px;margin:8px 0;background:#fffcf6}.player-card div{display:flex;flex-direction:column}.player-card span:not(.red-dot):not(.black-dot){font-size:.9rem;color:#82735f}.red-dot,.black-dot{width:12px;height:12px;border-radius:50%;display:block;flex:0 0 auto}.red-dot{background:var(--red)}.black-dot{background:var(--black)}
 .captured-title{font-size:.86rem;color:#82735f;margin:9px 0 5px}.captured{display:flex;flex-wrap:wrap;gap:5px;min-height:28px}.captured-piece{border:1px solid #ddceb4;border-radius:7px;padding:3px 7px;font-size:.88rem;background:#fffdf8}.captured-piece.red{color:var(--red)}.captured-piece.black{color:var(--black)}
 .log{padding-left:22px;margin:0;font-size:.85rem;max-height:180px;overflow:auto;color:#655442}.log li{margin:5px 0}#status{background:#f4ead8;border:1px solid #e7d6b7;padding:10px;border-radius:9px;line-height:1.5}
+/* Saved-game selector and the step controls form the replay viewer bar. */
+.replay-panel{border-color:#cbb58f;background:linear-gradient(180deg,#fffaf1,#fbf3e5)}
+.replay-head{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:14px}.replay-head h2{margin-bottom:3px}.replay-head p{margin:0}
+.replay-picker{display:flex;align-items:center;gap:9px;flex:1;justify-content:flex-end}.replay-picker select{width:min(100%,460px)}
+.replay-toolbar{display:grid;grid-template-columns:auto minmax(120px,1fr) auto auto;align-items:center;gap:10px;padding:11px 13px;margin-bottom:14px;background:#efe1c8;border:1px solid #ddc8a5;border-radius:12px}
+.replay-step-button{width:42px;height:42px;padding:0;font-size:.95rem;line-height:1}
+#replay-slider{width:100%;padding:0;accent-color:#87412b;cursor:pointer}
+#replay-step{min-width:92px;text-align:center;font-variant-numeric:tabular-nums;font-size:.9rem;color:#655442}
+.replay-board .cell{cursor:default}.replay-board .cell:hover{background:transparent}
+.replay-icon{background:#e9dcc4;color:#68472d;font-size:1.25rem}
 #toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#29231c;color:#fff5e4;border-radius:10px;padding:11px 16px;opacity:0;pointer-events:none;transition:opacity .2s;max-width:90vw;z-index:10;box-shadow:0 4px 18px #28170d35}#toast.show{opacity:1}
 footer{text-align:center;color:#95846b;font-size:.85rem;padding:20px}
-@media(max-width:850px){.shell{padding:12px}.play-area{grid-template-columns:1fr}.sidebar{display:grid;grid-template-columns:1fr 1fr;gap:0 14px}.sidebar h3:first-child,.sidebar #status,.sidebar .player-card,.sidebar .captured-title,.sidebar .captured,.sidebar .log{grid-column:span 2}.board-wrap{padding:7px}.game-top{gap:15px}.game-actions{margin-left:0}}
-@media(max-width:480px){.inline{flex-direction:column}.game-top{gap:12px}.piece{font-size:clamp(.62rem,5vw,1rem);width:80%}.board-wrap{padding:5px}.board-surface{width:100%}.sidebar{display:block}.sidebar h3:first-child,.sidebar #status,.sidebar .player-card,.sidebar .captured-title,.sidebar .captured,.sidebar .log{grid-column:auto}.river-label{font-size:clamp(.65rem,3.2vw,1rem);letter-spacing:.08em}}
+@media(max-width:850px){.shell{padding:12px}.play-area{grid-template-columns:1fr}.sidebar{display:grid;grid-template-columns:1fr 1fr;gap:0 14px}.sidebar h3:first-child,.sidebar #status,.sidebar .player-card,.sidebar .captured-title,.sidebar .captured,.sidebar .log{grid-column:span 2}.board-wrap{padding:7px}.game-top{gap:15px}.game-actions{margin-left:0}.replay-head{align-items:flex-start;flex-direction:column}.replay-picker{width:100%;justify-content:flex-start}.replay-picker select{flex:1}.replay-toolbar{grid-template-columns:auto minmax(100px,1fr) auto}.replay-toolbar output{grid-column:1/-1;text-align:center}}
+@media(max-width:480px){.inline,.replay-picker{flex-direction:column;align-items:stretch}.game-top{gap:12px}.piece{font-size:clamp(.62rem,5vw,1rem);width:80%}.board-wrap{padding:5px}.board-surface{width:100%}.sidebar{display:block}.sidebar h3:first-child,.sidebar #status,.sidebar .player-card,.sidebar .captured-title,.sidebar .captured,.sidebar .log{grid-column:auto}.river-label{font-size:clamp(.65rem,3.2vw,1rem);letter-spacing:.08em}.replay-toolbar{grid-template-columns:42px minmax(70px,1fr) 42px;padding:9px}.replay-step-button{width:42px}.replay-picker select{width:100%}}
 
 /* Alert-style in-page confirmation for incoming undo/draw requests. */
 .dialog-backdrop{position:fixed;inset:0;z-index:30;display:flex;align-items:center;justify-content:center;padding:20px;background:#1e170fc2;backdrop-filter:blur(2px)}

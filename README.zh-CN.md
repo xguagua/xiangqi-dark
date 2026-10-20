@@ -11,7 +11,7 @@
 - Python **3.10 或更新版本**，以及 `pip`。
 - 一台能被双方通过局域网访问的 Windows、Linux 或 macOS 电脑。
 - 每位玩家各自使用现代浏览器。
-- 当前页面会从 `cdn.socket.io` 加载 Socket.IO 浏览器客户端。Python 服务可以仅在局域网内运行，但浏览器仍需要访问该 CDN。若局域网完全离线，请参考[离线浏览器资源](#17-离线浏览器资源)。
+- 项目在 `static/socket.io.js` 中自带 Socket.IO 浏览器客户端。页面不使用在线 CDN，因此可以在完全离线的局域网中运行。
 
 不需要 Node.js、npm、前端打包工具或独立数据库服务。
 
@@ -22,6 +22,7 @@
 ```text
 xiangqi-dark/
 ├── app.py
+├── config.yaml
 ├── requirements.txt
 ├── README.md
 ├── README.zh-CN.md
@@ -30,6 +31,7 @@ xiangqi-dark/
 │   └── index.html
 └── static/
     ├── app.js
+    ├── socket.io.js
     └── style.css
 ```
 
@@ -74,6 +76,7 @@ python -m pip install -r requirements.txt
 - `Flask`：HTTP 路由和 HTML 模板渲染。
 - `Flask-SocketIO`：实时双向通信与对局事件。
 - `eventlet`：`app.py` 中指定使用的 Socket.IO 异步服务后端。
+- `PyYAML`：从 `config.yaml` 读取服务器监听地址和端口。
 
 若安装失败，请先检查是否已激活虚拟环境，以及 Python 版本和本机平台是否被相应依赖支持。不要随意删除 `requirements.txt` 中的 Eventlet：应用明确配置了 `async_mode="eventlet"`。
 
@@ -83,15 +86,23 @@ python -m pip install -r requirements.txt
 python app.py
 ```
 
-默认监听地址为 **`0.0.0.0:5000`**，因此同一局域网内的其他设备可以连接。服务器本机浏览器访问：
+服务器启动时读取 `config.yaml`。默认监听地址为 **`0.0.0.0:8080`**，因此同一局域网内的其他设备可以连接。服务器本机浏览器访问：
 
 ```text
-http://127.0.0.1:5000
+http://127.0.0.1:8080
 ```
 
 游戏期间请保持终端运行。结束服务时，在该终端按 **Ctrl+C**。
 
-如需更改端口：
+如需更改监听地址或端口，请编辑：
+
+```yaml
+server:
+  ip: 0.0.0.0
+  port: 8080
+```
+
+环境变量 `PORT` 可以临时覆盖 `server.port`：
 
 **PowerShell：**
 
@@ -106,27 +117,22 @@ python app.py
 PORT=8080 python app.py
 ```
 
-`PORT` 在服务器启动时读取。双方必须使用相同的主机地址和端口。
+双方必须使用相同的主机地址和端口。
 
 ### 1.6 让局域网中的另一台设备连接
 
 1. 查询服务器电脑的**局域网/私有 IP 地址**。Windows 执行 `ipconfig`，查找当前使用的网络适配器 IPv4 地址；Linux 可执行 `ip addr`；macOS 可在“网络”设置或通过 `ifconfig` 查看。
 2. 确认双方在允许局域网设备互访的网络中。访客 Wi-Fi 或开启了客户端隔离的无线网络可能会阻止设备互连。
-3. 对方在浏览器打开 `http://服务器局域网IP:5000`，并根据实际端口修改地址。
+3. 对方在浏览器打开 `http://服务器局域网IP:8080`，并根据 `config.yaml` 中的实际配置修改地址和端口。
 4. 双方分别设置昵称。一方创建房间并将五位房间号发给另一方，另一方输入房间号加入。
 
-**防火墙：** Windows 首次运行时，可允许对应 Python 程序或在可信的“专用网络”中放行 TCP 5000 端口。如使用其他端口，应放行相应端口。只对可信网络开放，不要为了排查问题而全局关闭防火墙。
+**防火墙：** Windows 首次运行时，可允许对应 Python 程序或在可信的“专用网络”中放行 TCP 8080 端口。如使用其他端口，应放行相应端口。只对可信网络开放，不要为了排查问题而全局关闭防火墙。
 
 ### 1.7 离线浏览器资源
 
-当前 `templates/index.html` 从 `https://cdn.socket.io/4.8.1/socket.io.min.js` 加载浏览器端 Socket.IO。服务器本身可以只在局域网中运行，但浏览器仍须能取得这段 JavaScript。如果局域网没有互联网连接：
+当前 `templates/index.html` 从 `/static/socket.io.js` 加载浏览器端 Socket.IO，**不使用在线 CDN**。项目自带的客户端版本为 Socket.IO 4.8.1，与 Flask-SocketIO 使用的 Socket.IO 4.x 服务端兼容。打包项目时应保留该本地资源，确保离线局域网没有外部浏览器依赖。
 
-1. 获取与当前 Flask-SocketIO 服务端兼容的 Socket.IO 4.x 浏览器客户端。
-2. 将压缩后的客户端文件放到 `static/socket.io.min.js`。
-3. 修改 `templates/index.html` 末尾的脚本引用，把 CDN URL 改为 `/static/socket.io.min.js`。
-4. 在分发版本前，重新加载页面并测试两名玩家能否正常连接。
-
-不要未经测试就使用来源不明或版本随意的客户端文件。
+升级 Socket.IO 时，请将与已安装 Flask-SocketIO 兼容的客户端替换到 `static/socket.io.js`。在分发版本前，重新加载页面并测试两名玩家能否正常连接。
 
 ### 1.8 持久化数据与重启恢复
 
@@ -135,9 +141,11 @@ PORT=8080 python app.py
 - **`players.sqlite3`**：`players` 表保存昵称和玩家当前对局标记；`games` 表保存未结束对局的序列化状态。
 - **`.flask_secret_key`**：若未设置环境变量 `SECRET_KEY`，首次启动时会自动生成。它用于签名浏览器的 Flask 会话 Cookie，其中包含持久化玩家 ID。
 
+同一个数据库中还有 `replays` 表，用于保存玩家在对局结束后选择保留的回放。每条回放只对保存它的已登录玩家可见。
+
 升级或重启时请保留这两个文件。删除数据库会丢失已保存的玩家和对局状态；更换会话密钥会使既有签名 Cookie 失效，服务器可能无法再识别原玩家。如果玩家清除了浏览器 Cookie 或网站数据，服务器也无法把该浏览器和此前的玩家 ID 关联起来。
 
-服务器启动时会从 SQLite 恢复未结束的棋局并保留双方座位。浏览器使用原会话 Cookie 重新连接后，Socket.IO 的 `connect` 处理器会将新的 socket ID 绑定到原座位并推送最新状态。`games.state_json` 会保存棋盘、回合、吃子列表、走棋记录、最近一步、悔棋历史、待处理申请和申请拒绝锁。
+服务器启动时会从 SQLite 恢复未结束的棋局并保留双方座位。浏览器使用原会话 Cookie 重新连接后，Socket.IO 的 `connect` 处理器会将新的 socket ID 绑定到原座位并推送最新状态。`games.state_json` 会保存棋盘、回合、吃子列表、走棋记录、最近一步、悔棋历史、回放帧、待处理申请和申请拒绝锁。
 
 **安全升级步骤：**
 
@@ -165,15 +173,15 @@ python -c "import secrets; print(secrets.token_hex(32))"
 |---|---|
 | 找不到 `python` 命令 | 安装 Python 并重新打开终端；Windows 可尝试 `py -3`。 |
 | 出现 `ModuleNotFoundError` | 激活 `.venv`，然后重新执行 `python -m pip install -r requirements.txt`。 |
-| 服务器本机也打不开网页 | 检查启动终端的报错、端口配置，尝试 `http://127.0.0.1:5000`。 |
+| 服务器本机也打不开网页 | 检查启动终端的报错和 `config.yaml`，在默认配置下尝试 `http://127.0.0.1:8080`。 |
 | 本机可用，另一台设备无法连接 | 检查服务器 LAN IP、网段、访客网络/客户端隔离、操作系统防火墙和端口。对方设备不能用 `127.0.0.1` 访问服务器。 |
-| 页面能打开，但连接状态始终断开 | 检查浏览器开发者工具及 Socket.IO CDN 是否可访问；必要时按上文改为本地资源。 |
+| 页面能打开，但连接状态始终断开 | 检查浏览器开发者工具，确认 `/static/socket.io.js` 能正常返回，并核对配置的监听地址、端口和防火墙。 |
 | 玩家无法回到原对局 | 保留浏览器 Cookie、`players.sqlite3` 和 `.flask_secret_key`；检查是否更换了访问主机名/会话，并查看服务器日志。 |
 | 更新后对局消失 | 停止使用有问题的版本并恢复数据库备份。修改 `serialize_game()` / `deserialize_game()` 时必须兼容旧版保存数据。 |
 
 ### 1.11 部署与安全边界
 
-本项目针对可信局域网娱乐和二次开发，**不是经过加固的公网服务**。它没有账号密码体系、TLS 终止、请求频率限制、滥用防护，也没有多工作进程共享的 Socket.IO 状态。不要直接将 5000 端口暴露到公网。若要公开部署，应先设置生产反向代理，并补充认证、TLS、请求防护、限流以及共享 Socket.IO 消息队列/会话方案。
+本项目针对可信局域网娱乐和二次开发，**不是经过加固的公网服务**。它没有账号密码体系、TLS 终止、请求频率限制、滥用防护，也没有多工作进程共享的 Socket.IO 状态。不要直接将 8080 端口暴露到公网。若要公开部署，应先设置生产反向代理，并补充认证、TLS、请求防护、限流以及共享 Socket.IO 消息队列/会话方案。
 
 项目使用进程内的 `rooms` 字典和 SQLite 持久化，按**单个应用进程**设计。SQLite 能让对局在进程重启后恢复，但不会自动让多个 worker 共享内存中的实时房间状态。
 
@@ -251,7 +259,16 @@ python -c "import secrets; print(secrets.token_hex(32))"
 - 悔棋或平局申请待处理期间，双方都不能走棋；只有收到申请的一方可以回复。过期或 ID 不匹配的请求会被服务端拒绝。
 - 界面会在不满足条件时禁用按钮，但服务端仍会再次校验所有关键条件。
 
-### 2.9 尚未实现的规则
+### 2.9 对局回放
+
+- 服务器会在每次成功行棋后记录一帧公开棋盘状态；若接受悔棋，对应最近两步行棋的回放帧也会一并删除。
+- 对局因吃掉将帅、投降或双方同意和棋而结束后，双方玩家会分别收到是否保留本局回放的询问。
+- 选择“保留回放”只会把回放保存到该玩家自己的回放列表；选择“不保留”不会为该玩家生成回放。双方可以独立决定。
+- 在大厅的“对局回放”栏中选择已保留的对局即可查看。拖拽条用于调整当前步数，左右两个三角形按钮分别查看上一步和下一步。
+- 回放帧与实时状态使用相同的隐私边界：棋盘中不会出现暗棋的真实棋种。暗棋被吃时，只有吃子方保存的回放会显示其真实种类。
+- 回放与保存时的登录会话绑定。清除浏览器 Cookie 或更换 `.flask_secret_key` 后，该浏览器可能无法再访问此前保留的回放。
+
+### 2.10 尚未实现的规则
 
 这是一个自定义休闲游戏，不是完整的竞赛象棋引擎。当前没有：
 
@@ -264,10 +281,13 @@ python -c "import secrets; print(secrets.token_hex(32))"
 ### 3.1 文件结构
 
 - `app.py`：权威游戏服务端，包括 Flask 路由、Socket.IO 事件、棋盘初始化、走法校验、房间管理、申请流程和 SQLite 持久化。
+- `config.yaml`：由 `app.py` 加载的服务器监听地址和端口。
 - `templates/index.html`：页面结构、棋盘 SVG 线条、操作按钮、侧栏及申请弹窗。
 - `static/app.js`：Socket.IO 客户端、前端临时状态、棋盘绘制、申请弹窗和用户交互。它不是走法合法性的权威来源。
 - `static/style.css`：木色棋盘与棋子样式、响应式布局、状态标记、弹窗和提示框样式。
+- `static/socket.io.js`：本地提供的 Socket.IO 4.8.1 浏览器客户端，不使用在线 CDN。
 - `requirements.txt`：Python 依赖及版本范围。
+- `CHANGELOG.md`：记录重要的用户可见变更与维护变更。
 - `README.md`：英文部署、规则和维护说明。
 - `LICENSE`：MIT 许可证。
 - `AGENTS.md`：供后续编码 Agent 遵循的项目约束和检查清单。
@@ -275,10 +295,11 @@ python -c "import secrets; print(secrets.token_hex(32))"
 ### 3.2 服务端数据模型
 
 - `Piece(kind, side, face_up, move_kind)`：`kind` 是真实棋种；`move_kind` 是初始格绑定的走法；`face_up` 决定 `legal_move()` 当前使用哪一个。
-- `GameRoom`：棋盘、玩家座位、回合、吃子列表、行棋日志、悔棋快照、最近一步、行棋/回合计数、待处理申请和拒绝锁。
+- `GameRoom`：棋盘、玩家座位、回合、吃子列表、行棋日志、悔棋快照、回放帧、最近一步、行棋/回合计数、待处理申请和拒绝锁。
 - `rooms`：以房间号为键的进程内字典。SQLite 用于进程启动时恢复对局，但实时状态仍保存在内存中。
 - `players` 表：保存稳定的浏览器/会话 `player_id`、昵称、`in_game`、`room_code`、`side`。**该表的列名叫 `sid`，但其中存的是持久化玩家 ID，而不是当前 Socket.IO SID。** 浏览器重连时，实时 socket ID 会被替换。
 - `games` 表：每个未结束房间保存一份 `state_json` 序列化状态。
+- `replays` 表：为每位选择保留终局回放的玩家保存一行，包含所有者持久玩家 ID、房间和结果元数据以及按所有者视角过滤后的回放 JSON。
 
 `db()` 负责创建表并迁移旧版本的玩家对局状态列。`serialize_game()` / `deserialize_game()` 定义对局存档格式。`load_persisted_rooms()` 在启动时恢复房间；`restore_player_room()` 在 Socket.IO 连接后重新绑定已保留的座位。
 
@@ -306,7 +327,15 @@ python -c "import secrets; print(secrets.token_hex(32))"
 | `state` | 针对当前玩家过滤过的对局状态快照。 |
 | `notice` | 操作结果或错误提示。 |
 | `request_result` | 玩家所发申请的处理结果。 |
-| `room_ended` | 通知对局结束并让页面返回大厅。 |
+| `room_ended` | 通知对局结束并让页面返回大厅，同时可携带 `replay_offer` 回放保留询问。 |
+
+HTTP 接口：
+
+| 接口 | 用途 |
+|---|---|
+| `GET /api/replays` | 列出当前登录玩家保存的回放。 |
+| `GET /api/replays/<id>` | 读取指定回放；服务器按所有者视角过滤数据。 |
+| `POST /api/replays/offers/<id>` | 当前玩家接受或拒绝终局回放保留邀请。 |
 
 `state` 的内容与查看者有关，必须保留暗棋与吃子信息的隐私规则。若新增 `GameRoom` 持久化字段，需要同步修改序列化和反序列化、为旧存档提供安全默认值，并检查悔棋快照是否也需要恢复该字段。
 
