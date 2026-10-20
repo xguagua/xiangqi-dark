@@ -14,7 +14,8 @@ Read `README.md` before changing behavior; `README.zh-CN.md` contains the same g
 8. **Single-process assumption.** `rooms` is process-local. SQLite allows recovery after restart but is not a shared real-time room backend for multiple workers. Do not recommend multi-worker deployment without introducing shared state and a Socket.IO message queue.
 9. **Treat runtime data as private.** Never commit `players.sqlite3`, `.flask_secret_key`, `.env`, or test data copied from a user's live database. Preserve the first two files during upgrades and backups.
 10. **Keep the browser client local.** `templates/index.html` loads Socket.IO from `/static/socket.io.js`, not from an online CDN. Do not replace it with a CDN URL; the game must remain usable on an offline LAN.
-11. **Preserve replay privacy and ownership.** Record only public board frames during play. Saved replays are owner-scoped, and hidden captured-piece identities must be filtered separately for each participant. Accepted two-move undos remove the corresponding replay frames.
+11. **Preserve replay privacy and file-only lifecycle.** Record only public board frames during play. Finished game files are filtered separately for each participant and are not stored in a replay list or database. Accepted two-move undos remove the corresponding replay frames. Export/import files stay in the player-observation schema and must reject unknown versions or true kinds for face-down board pieces.
+12. **Keep hidden-piece shuffling explicitly random.** Initialize the MT19937 generator through `mt19937_shuffle()` with OS-backed secret entropy. Do not replace it with a fixed or shared global seed.
 
 ## Change workflow
 
@@ -28,7 +29,7 @@ Read `README.md` before changing behavior; `README.zh-CN.md` contains the same g
    ```
 
    `node` is optional if unavailable. Syntax checks alone do not prove Socket.IO behavior.
-4. Manually test with two independent browsers/devices: room creation/joining, ordinary and illegal moves, information privacy, capture, request acceptance/rejection, undo of two moves, replay keep/discard and step controls, reload/reconnect, server restart, and end-of-game cleanup.
+4. Manually test with two independent browsers/devices: room creation/joining, ordinary and illegal moves, information privacy, capture, request acceptance/rejection, undo of two moves, post-game JSON download, uploaded-file viewing and step controls, reload/reconnect, server restart, and end-of-game cleanup.
 5. Update both README files when changing user-visible rules, deployment steps, or event contracts.
 6. Before packaging, verify that the archive contains only source/docs and does not contain virtual environments, `__pycache__`, SQLite databases, or secret key files.
 

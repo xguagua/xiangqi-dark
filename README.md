@@ -141,7 +141,7 @@ The application creates its SQLite database and Flask session key in the project
 - **`players.sqlite3`** — player nickname and active-match markers in `players`, plus serialized unfinished games in `games`.
 - **`.flask_secret_key`** — generated automatically on first startup when the `SECRET_KEY` environment variable is not set. It signs the browser's Flask session cookie, including the persistent player ID.
 
-The same database also contains the `replays` table for matches that a player chose to retain after the game ended. A replay is visible only to the signed-in player who saved it.
+Finished match files are not stored by the server. Each participant can download a player-filtered JSON file immediately after the result dialog, and can upload that file later for viewing.
 
 Keep both files when upgrading or restarting the server. Removing the database discards stored player/game state. Replacing the secret key invalidates existing signed browser sessions, so players may no longer be recognized as the same players. If the user clears their browser cookies/site data, the server can no longer associate that browser with its prior player ID.
 
@@ -196,6 +196,7 @@ These are the rules implemented by this project, including its custom dark-Xiang
 - Each side has 16 pieces in total: one General, two Advisors, two Elephants, two Horses, two Chariots, two Cannons, and five Soldiers.
 - Each General starts face-up at the center of its home back rank. The other 15 pieces on each side are face-down.
 - The **actual identities** of those 15 pieces are randomly shuffled among that side's 15 designated starting squares. The movement pattern of each face-down piece is initially bound to the standard Xiangqi piece associated with its starting square, not to its hidden actual identity. This is the core variant of this game.
+- Each side is shuffled independently with an MT19937 generator seeded from OS-backed secret entropy.
 
 ### 2.2 Turn and reveal
 
@@ -259,14 +260,15 @@ The movement below is the rule for a **revealed piece**, and also describes the 
 - While an undo/draw request is pending, neither player can make a move. Only the recipient can answer the request; stale or mismatched request IDs are rejected by the server.
 - Request controls are disabled client-side when unavailable, but all important conditions are checked again on the server.
 
-### 2.9 Saved replays
+### 2.9 Replay files
 
 - The server records the public board after every successful move. An accepted two-move undo removes the corresponding two replay frames.
-- When a match ends by general capture, surrender, or an accepted draw, each participant is asked whether to keep a replay.
-- Choosing **Keep replay** saves the recording to that player's own replay list; choosing **Don't keep** does not create a saved replay for that player. Each participant can make this choice independently.
-- Open a saved replay from the **Replays** panel on the lobby screen. The slider changes the displayed step, and the left/right triangle buttons move one step backward or forward.
-- Replay snapshots use the same privacy boundary as live states. A hidden piece's identity is not stored in browser-visible board frames. When a hidden piece is captured, only the capturing player's saved replay reveals its true kind.
-- Saved replays are scoped to the signed-in browser session that kept them. Clearing browser cookies or replacing `.flask_secret_key` can make those saved replays inaccessible to that browser.
+- When a match ends by general capture, surrender, or an accepted draw, each participant can choose **Download game JSON** or dismiss the prompt. The file is generated for that participant's own observation.
+- The server keeps no replay list. Finished replay data remains in memory only long enough for each participant to download or dismiss the prompt.
+- The main menu only provides **Upload game JSON** followed by the step viewer. Uploading does not create a persistent server-side record.
+- The slider changes the displayed step, and the left/right triangle buttons move one step backward or forward.
+- Replay snapshots use the same privacy boundary as live states. A hidden piece's identity is not stored in browser-visible board frames. When a hidden piece is captured, only the capturing player's downloaded file reveals its true kind.
+- Replay files are suitable for future observation-sequence analysis, behavior cloning, policy learning, and belief-state research. They deliberately contain only a player's observation, not the hidden ground truth needed for a privileged critic or omniscient simulator.
 
 ### 2.10 Rules deliberately not implemented
 
@@ -302,7 +304,7 @@ This is a custom casual game, not a complete tournament Xiangqi engine. In parti
 
 `db()` creates missing tables and migrates the game-status columns from older versions. `serialize_game()` / `deserialize_game()` define the persisted game-state schema. `load_persisted_rooms()` restores rooms at import/startup; `restore_player_room()` reattaches a reconnecting browser after its Socket.IO connection is established.
 
-`replays` stores one row per player who retained a finished match. The row includes the owner's persistent player ID, room/result metadata, and owner-filtered replay JSON, so one participant's decision or hidden-piece knowledge cannot affect the other participant's saved copy.
+Replay data is not a persisted database entity in the current version. Frame data is kept in `GameRoom.replay_frames` while unfinished games are restored, then filtered and offered as an in-memory JSON download after the result.
 
 ### 3.3 Socket.IO event contract
 
@@ -328,15 +330,17 @@ Server to client:
 | `state` | Player-specific public snapshot of the match. |
 | `notice` | Human-readable operation result/error. |
 | `request_result` | Result of a request sent by the player. |
-| `room_ended` | Match ended; the page returns to the lobby and receives an optional `replay_offer` prompt. |
+| `room_ended` | Match ended; the page returns to the lobby and receives an optional `replay_offer` JSON-download prompt. |
 
 HTTP endpoints:
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/replays` | List replays owned by the current signed-in player. |
-| `GET /api/replays/<id>` | Load one owner-filtered replay. |
-| `POST /api/replays/offers/<id>` | Accept or decline the post-game replay offer for the current player. |
+| `POST /api/replays/import` | Validate an uploaded file and return a transient player-view replay payload. |
+| `GET /api/replays/offers/<id>/export` | Download the just-finished match from the authorized participant's view. |
+| `POST /api/replays/offers/<id>/dismiss` | Dismiss the post-game download prompt and release the in-memory copy. |
+
+Replay files use format `xiangqi-dark-replay`, version `1`, ruleset `dark-xiangqi-custom-v1`, and privacy type `player_observation`. The top-level `game` object contains room, players, result, viewer side, move count, and recording metadata. Each `frames` entry contains `ply`, `action`, `turn`, `winner`, `last_move`, the observation `board`, `captured`, and `log`. Uploads are limited to 8 MB and 5,000 frames; malformed files, incompatible versions, and files containing hidden-piece true kinds are rejected.
 
 The `state` payload is viewer-specific. Keep its hidden-piece and captured-piece privacy rules intact. When adding a new persistent `GameRoom` field, update both serialization and deserialization, choose a safe default for old saved JSON, and consider how undo snapshots should restore it.
 

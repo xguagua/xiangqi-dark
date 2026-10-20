@@ -3,17 +3,18 @@
 // renders per-player snapshots and sends user intent rather than deciding rules.
 const socket = io();
 const $ = id => document.getElementById(id);
+const MAX_REPLAY_FILE_BYTES = 8 * 1024 * 1024;
 let mySide = null, roomCode = null, state = null, selected = null, handledRequestId = null, activeIncomingRequest = null;
-let replay = null, replayIndex = 0, replayList = [], pendingReplayOffer = null;
+let replay = null, replayIndex = 0, pendingReplayOffer = null;
 let toastTimer;
 function toast(message){$('toast').textContent=message;$('toast').classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').classList.remove('show'),2600)}
 socket.on('connect',()=>$('connection').textContent='已连接');
 socket.on('disconnect',()=>$('connection').textContent='连接断开');
 socket.on('notice',d=>toast(d.message));
-socket.on('nickname_ok',d=>{localStorage.setItem('darkxiangqiNickname',d.nickname);$('login-panel').classList.add('hidden');$('my-name').textContent=d.nickname;if(roomCode){$('lobby').classList.add('hidden');$('game').classList.remove('hidden');$('replay-panel').classList.add('hidden')}else{$('lobby').classList.remove('hidden');$('replay-panel').classList.remove('hidden');loadReplayList()}toast('昵称已保存到服务器')});
+socket.on('nickname_ok',d=>{localStorage.setItem('darkxiangqiNickname',d.nickname);$('login-panel').classList.add('hidden');$('my-name').textContent=d.nickname;if(roomCode){$('lobby').classList.add('hidden');$('game').classList.remove('hidden');$('replay-panel').classList.add('hidden')}else{$('lobby').classList.remove('hidden');$('replay-panel').classList.remove('hidden')}toast('昵称已保存到服务器')});
 socket.on('room_joined',d=>{roomCode=d.code;mySide=d.side;$('game').classList.remove('hidden');$('replay-panel').classList.add('hidden');$('code-label').textContent=d.code;$('side-label').textContent=d.side==='red'?'红方':'黑方';$('lobby').classList.add('hidden')});
 socket.on('state',s=>{state=s;roomCode=s.code;mySide=s.side;$('game').classList.remove('hidden');$('login-panel').classList.add('hidden');$('lobby').classList.add('hidden');$('replay-panel').classList.add('hidden');render();handleIncomingRequest()});
-socket.on('room_left',()=>{closeRequestDialog();roomCode=null;mySide=null;state=null;selected=null;handledRequestId=null;$('game').classList.add('hidden');$('lobby').classList.remove('hidden');$('replay-panel').classList.remove('hidden');loadReplayList();toast('已退出房间')});
+socket.on('room_left',()=>{closeRequestDialog();roomCode=null;mySide=null;state=null;selected=null;handledRequestId=null;$('game').classList.add('hidden');$('lobby').classList.remove('hidden');$('replay-panel').classList.remove('hidden');toast('已退出房间')});
 socket.on('room_ended',d=>{
  closeRequestDialog();
  const endingSide=mySide;
@@ -21,7 +22,7 @@ socket.on('room_ended',d=>{
  roomCode=null;mySide=null;state=null;selected=null;handledRequestId=null;
  $('game').classList.add('hidden');$('lobby').classList.remove('hidden');$('replay-panel').classList.remove('hidden');
  toast(message);
- if(d.replay_offer)showReplayDialog(d.replay_offer,message);else loadReplayList();
+ if(d.replay_offer)showReplayDialog(d.replay_offer,message);
 });
 // The HTTP nickname request can create/update the signed session cookie.
 // Reconnect Socket.IO so its handshake uses that same session and stable player ID.
@@ -75,41 +76,70 @@ $('reject-request').onclick=()=>respondToIncomingRequest(false);
 
 function showReplayDialog(offer,message){
  pendingReplayOffer=offer;
- $('replay-dialog-title').textContent='保留本局回放？';
- $('replay-dialog-message').textContent=`${message} 本局共 ${offer.move_count} 步，可以保留后在回放栏中分步查看。`;
- $('keep-replay').disabled=false;
+ $('replay-dialog-title').textContent='下载本局对局 JSON？';
+ $('replay-dialog-message').textContent=`${message} 本局共 ${offer.move_count} 步，可下载 JSON 文件保存在本地。`;
+ $('download-replay-json').disabled=false;
  $('discard-replay').disabled=false;
  $('replay-dialog').classList.remove('hidden');
- $('keep-replay').focus();
+ $('download-replay-json').focus();
 }
 function closeReplayDialog(){
  $('replay-dialog').classList.add('hidden');
 }
-async function decideReplay(keep){
+function triggerFileDownload(blob,filename){
+ const url=URL.createObjectURL(blob);
+ const link=document.createElement('a');
+ link.href=url;
+ link.download=filename;
+ document.body.appendChild(link);
+ link.click();
+ link.remove();
+ setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+async function downloadReplayOffer(){
  const offer=pendingReplayOffer;
  if(!offer)return;
- $('keep-replay').disabled=true;
+ $('download-replay-json').disabled=true;
  $('discard-replay').disabled=true;
  try{
-  const response=await fetch(`/api/replays/offers/${encodeURIComponent(offer.id)}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keep})});
-  const data=await response.json();
-  if(!response.ok)throw new Error(data.error||'无法处理回放邀请');
+  const response=await fetch(`/api/replays/offers/${encodeURIComponent(offer.id)}/export`);
+  if(!response.ok){
+   const data=await response.json().catch(()=>({}));
+   throw new Error(data.error||'无法下载对局记录');
+  }
+  const blob=await response.blob();
+  const disposition=response.headers.get('Content-Disposition')||'';
+  const match=disposition.match(/filename="([^"]+)"/i);
+  triggerFileDownload(blob,match?match[1]:`xiangqi-replay-${offer.id}.json`);
   pendingReplayOffer=null;
   closeReplayDialog();
-  toast(data.message||(keep?'回放已保留':'已放弃保留回放'));
-  await loadReplayList();
-  if(keep&&data.replay_id){
-   $('replay-select').value=data.replay_id;
-   await openReplay(data.replay_id);
-  }
+  toast('对局 JSON 已下载');
  }catch(error){
-  $('keep-replay').disabled=false;
+  $('download-replay-json').disabled=false;
   $('discard-replay').disabled=false;
-  toast(error.message||'无法处理回放邀请');
+  toast(error.message||'无法下载对局记录');
  }
 }
-$('keep-replay').onclick=()=>decideReplay(true);
-$('discard-replay').onclick=()=>decideReplay(false);
+async function dismissReplayOffer(){
+ const offer=pendingReplayOffer;
+ if(!offer)return;
+ $('download-replay-json').disabled=true;
+ $('discard-replay').disabled=true;
+ try{
+  const response=await fetch(`/api/replays/offers/${encodeURIComponent(offer.id)}/dismiss`,{method:'POST'});
+  const data=await response.json().catch(()=>({}));
+  if(!response.ok)throw new Error(data.error||'无法关闭下载提示');
+  pendingReplayOffer=null;
+  closeReplayDialog();
+  toast('已关闭下载提示');
+ }catch(error){
+  $('download-replay-json').disabled=false;
+  $('discard-replay').disabled=false;
+  toast(error.message||'无法关闭下载提示');
+ }
+}
+$('download-replay-json').onclick=downloadReplayOffer;
+$('discard-replay').onclick=dismissReplayOffer;
 
 // Internal piece codes are translated to Chinese glyphs only for display.
 const glyph = {K:'帅',A:'仕',B:'相',N:'马',R:'车',C:'炮',P:'兵',k:'将',a:'士',b:'象',n:'马',r:'车',c:'炮',p:'卒'};
@@ -169,60 +199,50 @@ function replayResultLabel(winner){
  if(winner==='black')return '黑方获胜';
  return '对局未结束';
 }
-function replayOptionLabel(item){
- const players=item.players||{};
- const matchup=`${players.red||'红方'} vs ${players.black||'黑方'}`;
- return `房间 ${item.room_code} · ${matchup} · ${replayResultLabel(item.winner)} · ${item.move_count} 步`;
-}
-async function loadReplayList(){
- try{
-  const response=await fetch('/api/replays');
-  const data=await response.json();
-  if(!response.ok)throw new Error(data.error||'无法读取回放');
-  replayList=data.replays||[];
-  const select=$('replay-select');
-  const previous=select.value;
-  select.innerHTML='';
-  if(!replayList.length){
-   const option=document.createElement('option');option.value='';option.textContent='暂无已保留回放';select.appendChild(option);
-  }else{
-   replayList.forEach(item=>{const option=document.createElement('option');option.value=item.id;option.textContent=replayOptionLabel(item);select.appendChild(option)});
-   if(replayList.some(item=>item.id===previous))select.value=previous;
-  }
-  select.disabled=!replayList.length;
-  $('open-replay').disabled=!replayList.length;
-  if(replay&&!replayList.some(item=>item.id===replay.id))closeReplayViewer();
-  return replayList;
- }catch(error){
-  toast(error.message||'无法读取回放');
-  return [];
- }
-}
 function closeReplayViewer(){
  replay=null;replayIndex=0;
  $('replay-viewer').classList.add('hidden');
  $('replay-toolbar').classList.add('hidden');
  $('close-replay').classList.add('hidden');
 }
-async function openReplay(replayId){
- if(!replayId)return;
+function displayReplay(data){
+ if(!data||!Array.isArray(data.frames)||!data.frames.length){
+  toast('对局记录没有可查看的帧');
+  return;
+ }
+ replay=data;
+ replayIndex=0;
+ const max=Math.max(0,replay.frames.length-1);
+ $('replay-slider').max=max;
+ $('replay-viewer').classList.remove('hidden');
+ $('replay-toolbar').classList.remove('hidden');
+ $('close-replay').classList.remove('hidden');
+ $('replay-red-player').textContent=(replay.players&&replay.players.red)||'红方';
+ $('replay-black-player').textContent=(replay.players&&replay.players.black)||'黑方';
+ setReplayStep(0);
+ $('replay-panel').scrollIntoView({behavior:'smooth',block:'start'});
+}
+async function importReplayFile(file){
+ if(!file)return;
+ if(file.size>MAX_REPLAY_FILE_BYTES){
+  toast('回放文件不能超过 8 MB');
+  $('replay-file').value='';
+  return;
+ }
+ $('upload-replay').disabled=true;
+ const body=new FormData();
+ body.append('file',file);
  try{
-  const response=await fetch(`/api/replays/${encodeURIComponent(replayId)}`);
-  const data=await response.json();
-  if(!response.ok)throw new Error(data.error||'无法读取回放');
-  replay=data;
-  replayIndex=0;
-  const max=Math.max(0,replay.frames.length-1);
-  $('replay-slider').max=max;
-  $('replay-viewer').classList.remove('hidden');
-  $('replay-toolbar').classList.remove('hidden');
-  $('close-replay').classList.remove('hidden');
-  $('replay-red-player').textContent=(replay.players&&replay.players.red)||'红方';
-  $('replay-black-player').textContent=(replay.players&&replay.players.black)||'黑方';
-  setReplayStep(0);
-  $('replay-panel').scrollIntoView({behavior:'smooth',block:'start'});
+  const response=await fetch('/api/replays/import',{method:'POST',body});
+  const data=await response.json().catch(()=>({}));
+  if(!response.ok)throw new Error(data.error||'无法上传回放文件');
+  toast(data.message||'对局记录已载入');
+  displayReplay(data.replay);
  }catch(error){
-  toast(error.message||'无法读取回放');
+  toast(error.message||'无法上传回放文件');
+ }finally{
+  $('upload-replay').disabled=false;
+  $('replay-file').value='';
  }
 }
 function setReplayStep(index){
@@ -246,7 +266,8 @@ function setReplayStep(index){
    :`第 ${replayIndex} 步后，${frame.turn==='red'?'红方':'黑方'}走棋。`;
  $('replay-status').textContent=status;
 }
-$('open-replay').onclick=()=>openReplay($('replay-select').value);
+$('upload-replay').onclick=()=>$('replay-file').click();
+$('replay-file').onchange=event=>importReplayFile(event.target.files&&event.target.files[0]);
 $('close-replay').onclick=closeReplayViewer;
 $('replay-prev').onclick=()=>setReplayStep(replayIndex-1);
 $('replay-next').onclick=()=>setReplayStep(replayIndex+1);
@@ -254,4 +275,4 @@ $('replay-slider').oninput=event=>setReplayStep(event.target.value);
 
 // Rehydrate the nickname field on load. Socket.IO connect restoration then
 // rejoins any saved match associated with this browser's existing session cookie.
-fetch('/api/me').then(r=>r.json()).then(d=>{if(d.nickname){$('nickname').value=d.nickname;socket.emit('set_nickname',{nickname:d.nickname});$('replay-panel').classList.remove('hidden');loadReplayList()}else{const saved=localStorage.getItem('darkxiangqiNickname');if(saved)$('nickname').value=saved}}).catch(()=>{});
+fetch('/api/me').then(r=>r.json()).then(d=>{if(d.nickname){$('nickname').value=d.nickname;socket.emit('set_nickname',{nickname:d.nickname});$('replay-panel').classList.remove('hidden')}else{const saved=localStorage.getItem('darkxiangqiNickname');if(saved)$('nickname').value=saved}}).catch(()=>{});

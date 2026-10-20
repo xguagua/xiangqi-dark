@@ -21,6 +21,7 @@ import secrets
 import sqlite3
 import string
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from threading import RLock
 import yaml
 from flask import Flask, render_template, request, session, jsonify
@@ -31,6 +32,12 @@ from flask_socketio import SocketIO, emit, join_room, leave_room
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "players.sqlite3")
 CONFIG_PATH = os.path.join(BASE_DIR, "config.yaml")
+REPLAY_FILE_FORMAT = "xiangqi-dark-replay"
+REPLAY_FILE_VERSION = 1
+REPLAY_RULESET = "dark-xiangqi-custom-v1"
+MAX_REPLAY_FILE_BYTES = 8 * 1024 * 1024
+MAX_REPLAY_FRAMES = 5000
+MAX_PENDING_REPLAYS = 64
 
 
 def load_config():
@@ -95,6 +102,7 @@ def load_secret_key():
 # async_mode matches the Eventlet dependency declared in requirements.txt.
 app = Flask(__name__)
 app.config["SECRET_KEY"] = load_secret_key()
+app.config["MAX_CONTENT_LENGTH"] = MAX_REPLAY_FILE_BYTES + 512 * 1024
 socketio = SocketIO(app, async_mode="eventlet")
 lock = RLock()
 rooms = {}
@@ -141,18 +149,6 @@ def db():
         state_json TEXT NOT NULL,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS replays (
-        id TEXT PRIMARY KEY,
-        owner_player_id TEXT NOT NULL,
-        room_code TEXT NOT NULL,
-        winner TEXT,
-        state_json TEXT NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )""")
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_replays_owner_created "
-        "ON replays(owner_player_id, created_at DESC)"
-    )
     conn.commit()
     return conn
 
@@ -378,6 +374,13 @@ def load_persisted_rooms():
 
 
 # ---- Board construction and authoritative rules ---------------------------
+def mt19937_shuffle(values):
+    """Shuffle with CPython's MT19937 RNG seeded from OS-backed secret entropy."""
+    shuffled = list(values)
+    random.Random(secrets.randbits(256)).shuffle(shuffled)
+    return shuffled
+
+
 def new_board():
     """Build a 10x9 board with fixed visible Generals and shuffled hidden types.
 
@@ -410,10 +413,8 @@ def new_board():
     red_slots.remove(red_general)
     black_slots.remove(black_general)
 
-    red_types = RED_TYPES.copy()
-    black_types = BLACK_TYPES.copy()
-    random.shuffle(red_types)
-    random.shuffle(black_types)
+    red_types = mt19937_shuffle(RED_TYPES)
+    black_types = mt19937_shuffle(BLACK_TYPES)
     for (y, x), kind in zip(red_slots, red_types):
         board[y][x] = Piece(kind, "red", False, red_move_kinds[(y, x)])
     for (y, x), kind in zip(black_slots, black_types):
@@ -556,6 +557,243 @@ def replay_frames_for_viewer(frames, viewer_side):
     ]
 
 
+def replay_export_document(data, created_at):
+    """Build a versioned, player-observation replay file for download or training."""
+    frames = []
+    for ply, frame in enumerate(data.get("frames", [])):
+        last_move = copy.deepcopy(frame.get("last_move"))
+        action = copy.deepcopy(frame.get("action"))
+        if action is None and last_move:
+            action = {
+                "from": copy.deepcopy(last_move["from"]),
+                "to": copy.deepcopy(last_move["to"]),
+                "side": last_move.get("side"),
+            }
+        frames.append({
+            "ply": ply,
+            "action": action,
+            "turn": frame.get("turn"),
+            "winner": frame.get("winner"),
+            "last_move": last_move,
+            "board": copy.deepcopy(frame.get("board", [])),
+            "captured": copy.deepcopy(frame.get("captured", {})),
+            "log": list(frame.get("log", [])),
+        })
+    return {
+        "format": REPLAY_FILE_FORMAT,
+        "version": REPLAY_FILE_VERSION,
+        "ruleset": REPLAY_RULESET,
+        "privacy": "player_observation",
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "game": {
+            "room_code": data.get("room_code", "-----"),
+            "players": copy.deepcopy(data.get("players", {})),
+            "winner": data.get("winner"),
+            "viewer_side": data.get("viewer_side"),
+            "move_count": max(0, len(frames) - 1),
+            "origin": data.get("origin", "server"),
+            "recorded_at": data.get("recorded_at", created_at),
+        },
+        "frames": frames,
+    }
+
+
+def normalize_replay_piece(piece):
+    """Validate one player-observation board cell from an uploaded replay."""
+    if piece is None:
+        return None
+    if not isinstance(piece, dict):
+        raise ValueError("回放棋盘格格式无效")
+    side = piece.get("side")
+    face_up = piece.get("face_up")
+    if side not in ("red", "black") or not isinstance(face_up, bool):
+        raise ValueError("回放棋子缺少有效的阵营或翻面状态")
+    kind = piece.get("kind")
+    if not face_up:
+        if kind is not None:
+            raise ValueError("回放文件不得包含未翻面棋子的真实棋种")
+        return {"side": side, "face_up": False, "kind": None}
+    if kind not in NAMES or (side == "red") != kind.isupper():
+        raise ValueError("回放中的明棋棋种与阵营不匹配")
+    return {"side": side, "face_up": True, "kind": kind}
+
+
+def normalize_replay_last_move(last_move):
+    """Validate and normalize a move marker/action coordinate pair."""
+    if last_move is None:
+        return None
+    if not isinstance(last_move, dict):
+        raise ValueError("回放着法格式无效")
+    try:
+        from_square = last_move["from"]
+        to_square = last_move["to"]
+        y1, x1 = from_square["y"], from_square["x"]
+        y2, x2 = to_square["y"], to_square["x"]
+    except (TypeError, ValueError, KeyError):
+        raise ValueError("回放着法坐标无效") from None
+    if any(
+        isinstance(value, bool) or not isinstance(value, int)
+        for value in (y1, x1, y2, x2)
+    ):
+        raise ValueError("回放着法坐标必须是整数")
+    if not (in_bounds(y1, x1) and in_bounds(y2, x2)):
+        raise ValueError("回放着法坐标超出棋盘")
+    normalized = {
+        "from": {"y": y1, "x": x1},
+        "to": {"y": y2, "x": x2},
+    }
+    side = last_move.get("side")
+    if side is not None:
+        if side not in ("red", "black"):
+            raise ValueError("回放着法阵营无效")
+        normalized["side"] = side
+    move_id = last_move.get("id")
+    if isinstance(move_id, int) and not isinstance(move_id, bool):
+        normalized["id"] = move_id
+    return normalized
+
+
+def normalize_uploaded_replay(document):
+    """Validate an uploaded replay file and convert it to the viewer response shape."""
+    if not isinstance(document, dict):
+        raise ValueError("回放文件顶层必须是 JSON 对象")
+    if document.get("format") != REPLAY_FILE_FORMAT:
+        raise ValueError("不是本项目的回放文件")
+    version = document.get("version")
+    if isinstance(version, bool) or version != REPLAY_FILE_VERSION:
+        raise ValueError("不支持的回放文件版本")
+    if document.get("ruleset") != REPLAY_RULESET:
+        raise ValueError("回放规则版本不兼容")
+    if document.get("privacy") != "player_observation":
+        raise ValueError("回放隐私类型不兼容")
+    game_meta = document.get("game")
+    raw_frames = document.get("frames")
+    if not isinstance(game_meta, dict) or not isinstance(raw_frames, list):
+        raise ValueError("回放文件缺少 game 或 frames")
+    if not 1 <= len(raw_frames) <= MAX_REPLAY_FRAMES:
+        raise ValueError(f"回放帧数必须在 1 到 {MAX_REPLAY_FRAMES} 之间")
+
+    winner = game_meta.get("winner")
+    if winner not in (None, "red", "black", "draw"):
+        raise ValueError("回放结果无效")
+    viewer_side = game_meta.get("viewer_side")
+    if viewer_side not in ("red", "black"):
+        raise ValueError("回放视角无效")
+    room_code = str(game_meta.get("room_code") or "UPLOAD").strip().upper()[:16]
+    players = game_meta.get("players") if isinstance(game_meta.get("players"), dict) else {}
+    normalized_players = {}
+    for side, fallback in (("red", "红方"), ("black", "黑方")):
+        normalized_players[side] = clean_nickname(players.get(side)) or fallback
+
+    frames = []
+    for index, raw_frame in enumerate(raw_frames):
+        if not isinstance(raw_frame, dict):
+            raise ValueError(f"第 {index} 帧格式无效")
+        board_data = raw_frame.get("board")
+        if not isinstance(board_data, list) or len(board_data) != 10:
+            raise ValueError(f"第 {index} 帧棋盘行数无效")
+        board = []
+        for row in board_data:
+            if not isinstance(row, list) or len(row) != 9:
+                raise ValueError(f"第 {index} 帧棋盘列数无效")
+            board.append([normalize_replay_piece(piece) for piece in row])
+
+        raw_captured = raw_frame.get("captured", {})
+        if not isinstance(raw_captured, dict):
+            raise ValueError(f"第 {index} 帧吃子列表无效")
+        captured = {}
+        for capturer in ("red", "black"):
+            items = raw_captured.get(capturer, [])
+            if not isinstance(items, list):
+                raise ValueError(f"第 {index} 帧吃子列表格式无效")
+            captured[capturer] = []
+            for item in items:
+                if not isinstance(item, dict) or item.get("side") not in ("red", "black"):
+                    raise ValueError(f"第 {index} 帧吃子记录无效")
+                face_up = item.get("face_up")
+                if not isinstance(face_up, bool):
+                    raise ValueError(f"第 {index} 帧吃子翻面状态无效")
+                kind = item.get("kind")
+                if kind is not None and (
+                    kind not in NAMES or (item["side"] == "red") != kind.isupper()
+                ):
+                    raise ValueError(f"第 {index} 帧吃子棋种无效")
+                captured[capturer].append({
+                    "kind": kind,
+                    "side": item["side"],
+                    "face_up": face_up,
+                })
+
+        turn = raw_frame.get("turn")
+        frame_winner = raw_frame.get("winner")
+        if turn not in ("red", "black"):
+            raise ValueError(f"第 {index} 帧回合无效")
+        if frame_winner not in (None, "red", "black", "draw"):
+            raise ValueError(f"第 {index} 帧结果无效")
+        if frame_winner is not None and index != len(raw_frames) - 1:
+            raise ValueError(f"第 {index} 帧在终局前包含结果")
+        raw_log = raw_frame.get("log", [])
+        if not isinstance(raw_log, list) or any(not isinstance(line, str) for line in raw_log):
+            raise ValueError(f"第 {index} 帧日志格式无效")
+        if any(len(line) > 2000 for line in raw_log):
+            raise ValueError(f"第 {index} 帧日志过长")
+        last_move = normalize_replay_last_move(raw_frame.get("last_move"))
+        action = normalize_replay_last_move(raw_frame.get("action"))
+        if index == 0 and (last_move or action):
+            raise ValueError("初始回放帧不能包含着法")
+        if action is None and last_move:
+            action = {
+                "from": copy.deepcopy(last_move["from"]),
+                "to": copy.deepcopy(last_move["to"]),
+                "side": last_move.get("side"),
+            }
+        elif last_move is None and action:
+            last_move = copy.deepcopy(action)
+        if index > 0:
+            if not action or action.get("side") not in ("red", "black"):
+                raise ValueError(f"第 {index} 帧缺少有效着法")
+            if not last_move or (
+                action["from"] != last_move["from"]
+                or action["to"] != last_move["to"]
+                or ("side" in last_move and last_move["side"] != action["side"])
+            ):
+                raise ValueError(f"第 {index} 帧 action 与 last_move 不一致")
+            previous_board = frames[-1]["board"]
+            from_y, from_x = action["from"]["y"], action["from"]["x"]
+            to_y, to_x = action["to"]["y"], action["to"]["x"]
+            moving_piece = previous_board[from_y][from_x]
+            if not moving_piece or moving_piece["side"] != action["side"]:
+                raise ValueError(f"第 {index} 帧着法起点棋子无效")
+            if board[from_y][from_x] is not None:
+                raise ValueError(f"第 {index} 帧着法起点未清空")
+            landed_piece = board[to_y][to_x]
+            if not landed_piece or landed_piece["side"] != action["side"]:
+                raise ValueError(f"第 {index} 帧着法终点棋子无效")
+        frames.append({
+            "board": board,
+            "turn": turn,
+            "winner": frame_winner,
+            "captured": captured,
+            "log": list(raw_log),
+            "last_move": last_move,
+            "action": action,
+        })
+
+    if winner is not None:
+        frames[-1]["winner"] = winner
+    elif frames[-1]["winner"] is not None:
+        raise ValueError("未结束对局的最终帧不能包含结果")
+    return {
+        "room_code": room_code,
+        "winner": winner,
+        "viewer_side": viewer_side,
+        "players": normalized_players,
+        "frames": frames,
+        "origin": "uploaded",
+        "recorded_at": str(game_meta.get("recorded_at") or "")[:64] or None,
+    }
+
+
 def snapshot(game, sid):
     """Create the state payload for one socket, with capture knowledge filtered.
 
@@ -694,76 +932,86 @@ def save_nickname_http():
     return jsonify({"nickname": nickname})
 
 
-@app.get("/api/replays")
-def list_replays():
-    """List saved replays owned by the current signed-in player."""
-    player_id = session.get("player_id")
-    if not player_id:
-        return jsonify({"replays": []})
-    conn = db()
-    try:
-        rows = conn.execute(
-            "SELECT id, state_json, created_at FROM replays "
-            "WHERE owner_player_id = ? ORDER BY created_at DESC",
-            (player_id,),
-        ).fetchall()
-    finally:
-        conn.close()
-    replays = []
-    for row in rows:
-        try:
-            data = json.loads(row["state_json"])
-        except (TypeError, ValueError):
-            continue
-        replays.append({
-            "id": row["id"],
-            "room_code": data.get("room_code", "-----"),
-            "winner": data.get("winner"),
-            "viewer_side": data.get("viewer_side"),
-            "players": data.get("players", {}),
-            "move_count": max(0, len(data.get("frames", [])) - 1),
-            "created_at": row["created_at"],
-        })
-    return jsonify({"replays": replays})
-
-
-@app.get("/api/replays/<replay_id>")
-def get_replay(replay_id):
-    """Return one owner-filtered replay to its participant."""
+@app.post("/api/replays/import")
+def import_replay():
+    """Validate an uploaded replay file and return it for immediate viewing."""
     player_id = session.get("player_id")
     if not player_id:
         return jsonify({"error": "请先设置昵称。"}), 403
-    conn = db()
+    uploaded = request.files.get("file")
+    if uploaded is None:
+        return jsonify({"error": "请选择要上传的回放文件。"}), 400
+    raw = uploaded.read(MAX_REPLAY_FILE_BYTES + 1)
+    if len(raw) > MAX_REPLAY_FILE_BYTES:
+        return jsonify({"error": "回放文件不能超过 8 MB。"}), 413
     try:
-        row = conn.execute(
-            "SELECT state_json, created_at FROM replays "
-            "WHERE id = ? AND owner_player_id = ?",
-            (replay_id, player_id),
-        ).fetchone()
-    finally:
-        conn.close()
-    if not row:
-        return jsonify({"error": "回放不存在或无权查看。"}), 404
-    try:
-        data = json.loads(row["state_json"])
-    except (TypeError, ValueError):
-        return jsonify({"error": "回放数据已损坏。"}), 500
-    data["id"] = replay_id
-    data["created_at"] = row["created_at"]
-    data["move_count"] = max(0, len(data.get("frames", [])) - 1)
-    return jsonify(data)
+        document = json.loads(raw)
+        data = normalize_uploaded_replay(document)
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+        return jsonify({"error": "回放文件不是有效的 UTF-8 JSON。"}), 400
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({
+        "message": "对局记录已载入。",
+        "replay": data,
+    })
 
 
-@app.post("/api/replays/offers/<offer_id>")
-def decide_replay_offer(offer_id):
-    """Keep or discard the replay offer for the authenticated participant."""
+@app.get("/api/replays/offers/<offer_id>/export")
+def export_finished_replay(offer_id):
+    """Download the just-finished match from the authenticated participant's view."""
     player_id = session.get("player_id")
     if not player_id:
         return jsonify({"error": "请先设置昵称。"}), 403
-    keep = bool((request.get_json(silent=True) or {}).get("keep"))
     with lock:
-        result, status = resolve_replay_offer(offer_id, player_id, keep)
-    return jsonify(result), status
+        offer = pending_replays.get(offer_id)
+        viewer_side = participant_side(offer, player_id) if offer else None
+        if not offer or viewer_side is None:
+            return jsonify({"error": "该对局记录已失效或无权下载。"}), 404
+        data = {
+            "room_code": offer["room_code"],
+            "winner": offer["winner"],
+            "viewer_side": viewer_side,
+            "players": {
+                side: player["nickname"]
+                for side, player in offer["players"].items()
+            },
+            "frames": replay_frames_for_viewer(offer["frames"], viewer_side),
+            "origin": "server",
+            "recorded_at": offer["created_at"],
+        }
+        mark_replay_offer_response(offer_id, offer, player_id)
+    payload = json.dumps(
+        replay_export_document(data, offer["created_at"]),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    response = app.response_class(payload, mimetype="application/json")
+    response.headers["Content-Disposition"] = (
+        f'attachment; filename="xiangqi-replay-{offer_id}.json"'
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.post("/api/replays/offers/<offer_id>/dismiss")
+def dismiss_finished_replay(offer_id):
+    """Dismiss the post-game download prompt and release its in-memory copy."""
+    player_id = session.get("player_id")
+    if not player_id:
+        return jsonify({"error": "请先设置昵称。"}), 403
+    with lock:
+        offer = pending_replays.get(offer_id)
+        if not offer or participant_side(offer, player_id) is None:
+            return jsonify({"error": "该对局记录已失效。"}), 404
+        mark_replay_offer_response(offer_id, offer, player_id)
+    return jsonify({"message": "已关闭下载提示。"})
+
+
+@app.errorhandler(413)
+def request_too_large(_error):
+    """Return a JSON error when an uploaded replay exceeds the request limit."""
+    return jsonify({"error": "上传内容过大，回放文件不能超过 8 MB。"}), 413
 
 
 # ---- Socket.IO event handlers ----------------------------------------------
@@ -876,6 +1124,7 @@ def create_replay_offer(game):
         "id": offer_id,
         "room_code": game.code,
         "winner": game.winner,
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "players": {
             side: {
                 "player_id": player.get("player_id"),
@@ -884,18 +1133,17 @@ def create_replay_offer(game):
             for side, player in game.players.items()
         },
         "frames": copy.deepcopy(game.replay_frames),
-        "responses": {},
+        "responses": set(),
     }
+    while len(pending_replays) >= MAX_PENDING_REPLAYS:
+        pending_replays.pop(next(iter(pending_replays)), None)
     pending_replays[offer_id] = offer
     return offer
 
 
-def resolve_replay_offer(offer_id, player_id, keep):
-    """Apply one participant's replay decision without affecting the other participant."""
-    offer = pending_replays.get(offer_id)
-    if not offer:
-        return {"error": "该回放邀请已失效。"}, 404
-    viewer_side = next(
+def participant_side(offer, player_id):
+    """Return the participant's side for one finished-match export offer."""
+    return next(
         (
             side
             for side, player in offer["players"].items()
@@ -903,57 +1151,18 @@ def resolve_replay_offer(offer_id, player_id, keep):
         ),
         None,
     )
-    if viewer_side is None:
-        return {"error": "你不是本局参与者，无法处理该回放。"}, 403
-    if player_id in offer["responses"]:
-        existing_id = offer["responses"][player_id]
-        return {
-            "saved": existing_id is not None,
-            "replay_id": existing_id,
-            "message": "回放已保留。" if existing_id else "已放弃保留本局回放。",
-        }, 200
-    saved_id = None
-    if keep:
-        saved_id = secrets.token_urlsafe(12)
-        data = {
-            "room_code": offer["room_code"],
-            "winner": offer["winner"],
-            "viewer_side": viewer_side,
-            "players": {
-                side: player["nickname"]
-                for side, player in offer["players"].items()
-            },
-            "frames": replay_frames_for_viewer(offer["frames"], viewer_side),
-        }
-        conn = db()
-        try:
-            conn.execute(
-                "INSERT INTO replays(id, owner_player_id, room_code, winner, state_json) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (
-                    saved_id,
-                    player_id,
-                    offer["room_code"],
-                    offer["winner"],
-                    json.dumps(data, ensure_ascii=False, separators=(",", ":")),
-                ),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-    offer["responses"][player_id] = saved_id
+
+
+def mark_replay_offer_response(offer_id, offer, player_id):
+    """Release a finished replay after both participants download or dismiss it."""
+    offer["responses"].add(player_id)
     participant_ids = {
         player.get("player_id")
         for player in offer["players"].values()
         if player.get("player_id")
     }
-    if participant_ids and participant_ids.issubset(set(offer["responses"])):
+    if participant_ids and participant_ids.issubset(offer["responses"]):
         pending_replays.pop(offer_id, None)
-    return {
-        "saved": keep,
-        "replay_id": saved_id,
-        "message": "回放已保留。" if keep else "已放弃保留本局回放。",
-    }, 200
 
 
 def finish_game(game, result, message=None, state_already_broadcast=False):

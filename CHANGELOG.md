@@ -7,6 +7,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Export a just-finished match as a versioned, player-observation JSON file.
+- Validate and upload a replay file for immediate viewing in the main menu.
+- Add a documented replay schema suitable for future behavior cloning, policy training, and belief-state analysis.
+
+### Changed
+
+- Replace the post-game replay-retention choice with a direct **Download game JSON** action.
+- Seed an explicit MT19937 generator from OS-backed entropy and use it for both hidden-piece shuffles.
+
+### Removed
+
+- Remove the replay picker/list UI, persistent replay-list endpoints, and replay database writes.
+
 ## [0.2.0] - 2026-10-21
 
 ### Added
