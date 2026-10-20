@@ -1,0 +1,21 @@
+# Python caches / virtual environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local runtime state (do not commit player/game data or signing keys)
+players.sqlite3
+players.sqlite3-*
+*.sqlite3
+*.sqlite3-*
+.flask_secret_key
+.env
+
+# Editor / operating-system noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+PROMPT.md

@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>局域网暗棋</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main class="shell">
+    <header><div><h1>暗棋 · 局域网对战</h1><p>翻开未知，步步为营</p></div><span id="connection" class="pill">连接中…</span></header>
+
+    <!-- Nickname is a local session identity, not a password-based account. -->
+    <section class="panel" id="login-panel">
+      <h2>玩家昵称</h2>
+      <p class="muted">首次进入请设置昵称。昵称会保存到服务器本地数据库。</p>
+      <div class="inline"><input id="nickname" maxlength="16" placeholder="输入昵称（最多 16 字）"><button id="save-name">进入游戏</button></div>
+    </section>
+
+    <!-- Room creation/joining is signaled to the authoritative Socket.IO server. -->
+    <section class="panel hidden" id="lobby">
+      <div class="lobby-head"><div><h2>大厅</h2><p>你好，<b id="my-name"></b></p></div><button class="secondary" id="create-room">创建房间</button></div>
+      <div class="inline"><input id="room-code" maxlength="5" placeholder="输入 5 位房间号"><button id="join-room">加入房间</button></div>
+    </section>
+
+    <!-- All board content is rendered from the latest server-side state snapshot. -->
+    <section class="game hidden" id="game">
+      <div class="game-top panel">
+        <div><span class="muted">房间号</span><strong id="code-label">-----</strong></div>
+        <div><span class="muted">你执</span><strong id="side-label">-</strong></div>
+        <div><span class="muted">当前回合</span><strong id="turn-label">等待中</strong></div>
+        <div class="game-actions"><button class="secondary" id="request-undo">悔棋</button><button class="secondary" id="copy-code">复制房间号</button><button class="secondary" id="request-draw">申请平局</button><button class="danger" id="surrender">投降</button></div>
+      </div>
+      <div class="play-area">
+        <div class="board-wrap">
+          <div class="board-surface">
+            <svg class="board-lines" viewBox="0 0 900 1000" preserveAspectRatio="none" aria-hidden="true">
+              <g fill="none" stroke="#24180e" stroke-width="3" stroke-linecap="square" stroke-linejoin="miter">
+                <path d="M50 50 H850 M50 150 H850 M50 250 H850 M50 350 H850 M50 450 H850 M50 550 H850 M50 650 H850 M50 750 H850 M50 850 H850 M50 950 H850" />
+                <path d="M50 50 V950 M850 50 V950" />
+                <path d="M150 50 V450 M250 50 V450 M350 50 V450 M450 50 V450 M550 50 V450 M650 50 V450 M750 50 V450 M150 550 V950 M250 550 V950 M350 550 V950 M450 550 V950 M550 550 V950 M650 550 V950 M750 550 V950" />
+                <path d="M350 50 L550 250 M550 50 L350 250 M350 750 L550 950 M550 750 L350 950" />
+              </g>
+            </svg>
+            <div class="river-label" aria-hidden="true"><span>楚 河</span><span>汉 界</span></div>
+            <div id="board" class="board" aria-label="象棋棋盘"></div>
+          </div>
+        </div>
+        <aside class="panel sidebar">
+          <h3>对局信息</h3><p id="status">等待玩家加入…</p>
+          <div class="player-card"><span class="red-dot"></span><div><b>红方</b><span id="red-player">等待加入</span></div></div>
+          <div class="player-card"><span class="black-dot"></span><div><b>黑方</b><span id="black-player">等待加入</span></div></div>
+          <h3>被吃棋子</h3><div class="captured-title">红方吃子</div><div id="captured-red" class="captured"></div>
+          <div class="captured-title">黑方吃子</div><div id="captured-black" class="captured"></div>
+          <h3>走棋记录</h3><ol id="log" class="log"></ol>
+        </aside>
+      </div>
+    </section>
+    <!-- Custom in-page alert dialog used for incoming undo and draw requests. -->
+    <div id="request-dialog" class="dialog-backdrop hidden" role="alertdialog" aria-modal="true" aria-labelledby="request-title" aria-describedby="request-message">
+      <div class="request-dialog-card">
+        <div class="dialog-icon" aria-hidden="true">!</div>
+        <h2 id="request-title">对局申请</h2>
+        <p id="request-message">对方发来一项申请，请选择是否同意。</p>
+        <div class="dialog-actions">
+          <button id="reject-request" class="secondary" type="button">拒绝</button>
+          <button id="accept-request" type="button">同意</button>
+        </div>
+      </div>
+    </div>
+    <div id="toast" role="status" aria-live="polite"></div>
+    <footer>规则校验在服务端执行 · Flask + Socket.IO</footer>
+  </main>
+  <!-- This client dependency is currently loaded from a CDN; see README for offline hosting. -->
+  <script src="/static/socket.io.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
